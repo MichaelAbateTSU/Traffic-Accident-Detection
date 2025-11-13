@@ -1,0 +1,19 @@
+# Core dependencies for YOLO-based traffic monitoring
+ultralytics>=8.0.0        # YOLOv8
+opencv-python>=4.8.0      # Image processing and video capture
+numpy>=1.24.0             # Numerical operations
+torch>=2.0.0              # PyTorch (required by YOLOv8)
+torchvision>=0.15.0       # Vision utilities for PyTorch
+
+# Web automation for camera access
+selenium>=4.15.0          # Web browser automation
+
+# Utilities
+pillow>=10.0.0           # Image handling
+python-dateutil>=2.8.2   # Date/time utilities
+
+# Optional but recommended
+# matplotlib>=3.7.0       # For visualizations
+# pandas>=2.0.0          # Data analysis
+# pyyaml>=6.0            # Configuration files
+
