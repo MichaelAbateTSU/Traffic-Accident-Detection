@@ -1,0 +1,15 @@
+{
+  "run_timestamp": "2026-02-26T17:16:09.748298",
+  "source": "https://mcleansfs3.us-east-1.skyvdn.com/rtplive/R2_066/playlist.m3u8",
+  "frames_processed": 5,
+  "frame_scores": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "final_score": 0.0,
+  "accident_detected": false,
+  "method": "mean"
+}

@@ -1,0 +1,16 @@
+{
+  "frame": 4,
+  "timestamp": "2026-02-26T17:16:29.572469",
+  "score": 0.0,
+  "accident_detected": false,
+  "signal_values": {
+    "sudden_stop": 0.0,
+    "abrupt_decel": 0.0,
+    "collision_iou": 0.0,
+    "post_collision": 0.0,
+    "traffic_anomaly": 0.0
+  },
+  "tracks_count": 17,
+  "involved_track_ids": [],
+  "event_region": null
+}

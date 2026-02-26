@@ -474,6 +474,134 @@ browser = webdriver.Firefox(service=service)
 - Try different camera angle/location
 - Lower confidence threshold if needed
 
+## 🚦 Tracking & Accident Detection (pipeline.py)
+
+The new `pipeline.py` adds **DeepSORT-based vehicle tracking** and a continuous
+**accident confidence score** on top of the existing YOLO detector.
+
+### How the Pipeline Works
+
+```
+HLS stream / video / images
+        │
+        ▼
+  YOLO detection          ← vehicle classes only (car, bus, truck, motorcycle)
+        │  (x1,y1,x2,y2, conf, class)
+        ▼
+  DeepSORT tracker        ← assigns persistent track IDs across frames
+        │  confirmed Track objects
+        ▼
+  AccidentScorer          ← rolling 5-second window of per-track history
+        │  score ∈ [0,1], accident_detected bool, metadata
+        ▼
+  Annotated output frame  ← bounding boxes + "ID N class" labels + score banner
+```
+
+### Installation
+
+Install the additional dependency:
+
+```bash
+pip install deep-sort-realtime>=1.3.2
+# or just re-run:
+pip install -r requirements.txt
+```
+
+> `deep-sort-realtime` ships a built-in MobileNet Re-ID extractor — no extra
+> model download is required.
+
+### Running the Pipeline
+
+```bash
+# Default: live TDOT HLS stream
+python pipeline.py
+
+# Local video file
+python pipeline.py --source path/to/video.mp4
+
+# Folder of images (processed in filename order)
+python pipeline.py --source frames/
+
+# Custom HLS / RTSP URL
+python pipeline.py --source https://example.com/stream.m3u8
+
+# Test mode — processes 300 frames, prints per-frame scores, then exits
+python pipeline.py --source video.mp4 --test
+
+# Headless (no preview window — for servers)
+python pipeline.py --source video.mp4 --no-display
+
+# Combine flags
+python pipeline.py --source video.mp4 --test --no-display --max-test-frames 100
+```
+
+### Console Output
+
+```
+[00042] score=0.031  stop=0.00  decel=0.00  iou=0.00  post=0.00  anomaly=0.00  tracks=7
+[00043] score=0.044  stop=0.00  decel=0.12  iou=0.00  post=0.00  anomaly=0.00  tracks=7
+[00081] score=0.712 *** ACCIDENT DETECTED ***  stop=0.50  decel=0.45  iou=0.80  post=0.80  anomaly=0.50  tracks=5
+         involved tracks: [3, 9]  region: (412.0, 210.0, 587.0, 334.0)
+```
+
+Annotated frames are saved to `pipeline_output/` (JPEG by default).
+
+### Accident Confidence Signals
+
+Five heuristic signals are computed from each track's rolling history window
+(last 5 seconds) and combined into a weighted score:
+
+| Signal | Weight | Description |
+|---|---|---|
+| `sudden_stop` | 0.25 | A track's speed drops below threshold and stays near-zero |
+| `abrupt_decel` | 0.20 | High negative mean acceleration over a short window |
+| `collision_iou` | 0.30 | Two tracks' boxes overlap **and** were converging beforehand |
+| `post_collision` | 0.15 | After overlap: track stationary or moving erratically |
+| `traffic_anomaly` | 0.10 | Multiple nearby vehicles also slow near the event region |
+
+**Scoring pipeline:**
+```
+raw_score      = Σ (weight × signal)
+smoothed_score = EMA(raw_score, α=0.30)
+
+accident_detected = True   when smoothed_score ≥ 0.65
+accident_detected = False  when smoothed_score < 0.40  (hysteresis)
+```
+
+### Configuration
+
+All parameters live in `config.py` — edit once and every module picks up the change:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `VEHICLE_CLASSES` | `[2,3,5,7]` | COCO IDs: car, motorcycle, bus, truck |
+| `DET_CONF_THRESHOLD` | `0.30` | Minimum YOLO detection confidence |
+| `HISTORY_WINDOW_SECONDS` | `5` | Rolling history length per track |
+| `DEEPSORT_MAX_AGE` | `30` | Frames before a lost track is deleted |
+| `STOP_SPEED_THRESHOLD` | `5.0 px/frame` | Speed below which a vehicle is "stopped" |
+| `COLLISION_IOU_THRESHOLD` | `0.10` | Min box IoU to flag a collision event |
+| `EMA_ALPHA` | `0.30` | Score smoothing strength (higher = faster) |
+| `HIGH_THRESHOLD` | `0.65` | Score level that sets `accident_detected = True` |
+| `LOW_THRESHOLD` | `0.40` | Score level that clears `accident_detected` |
+| `OUTPUT_DIR` | `pipeline_output` | Directory for saved annotated frames |
+
+### New Files
+
+| File | Purpose |
+|---|---|
+| `pipeline.py` | Main entry point — CLI with `--source`, `--test`, `--no-display` |
+| `tracker.py` | `DeepSortTracker` — wraps DeepSort, handles xyxy ↔ xywh conversion |
+| `accident_scorer.py` | `AccidentScorer` — rolling history, five signals, EMA + hysteresis |
+| `config.py` | Central configuration for all modules |
+
+### Coordinate Format
+
+- **YOLO output**: `xyxy` (x1, y1, x2, y2) pixel coords
+- **DeepSORT input**: `xywh` (left, top, width, height) — converted inside `tracker.py`
+- **Internal history**: `cx, cy` (box centre) used for velocity and acceleration maths
+
+---
+
 ## 🚀 Future Enhancements
 
 ### Planned Features (See `implementation_plan.md`)

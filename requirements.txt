@@ -5,6 +5,9 @@ numpy>=1.24.0             # Numerical operations
 torch>=2.0.0              # PyTorch (required by YOLOv8)
 torchvision>=0.15.0       # Vision utilities for PyTorch
 
+# DeepSORT tracking (pipeline.py)
+deep-sort-realtime>=1.3.2 # DeepSORT multi-object tracker with built-in Re-ID
+
 # Utilities
 pillow>=10.0.0           # Image handling
 python-dateutil>=2.8.2   # Date/time utilities
