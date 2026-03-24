@@ -1,516 +1,326 @@
-# Traffic Accident Detection with YOLOv8
+# Traffic Accident Detection — YOLOv8 + DeepSORT + FastAPI
 
-A Python-based traffic monitoring system that captures live camera feeds from TDOT (Tennessee Department of Transportation) traffic cameras and uses YOLOv8 object detection to identify vehicles and analyze traffic patterns for potential accident detection.
+A production-ready traffic accident detection system that processes live HLS/RTSP camera streams using **YOLOv8** object detection and **DeepSORT** multi-object tracking, exposed as a **REST API** built with FastAPI.
 
-## 📋 Table of Contents
+---
+
+## Table of Contents
 
 - [Overview](#overview)
-- [Features](#features)
+- [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [How It Works](#how-it-works)
-- [Usage](#usage)
+- [Running the API Server](#running-the-api-server)
+- [API Reference](#api-reference)
+- [Running the Pipeline Directly](#running-the-pipeline-directly)
 - [Configuration](#configuration)
+- [Detection Signals](#detection-signals)
 - [Output](#output)
 - [Troubleshooting](#troubleshooting)
-- [Future Enhancements](#future-enhancements)
-- [Technical Details](#technical-details)
 
-## 🎯 Overview
+---
 
-This project monitors live traffic camera feeds and uses computer vision (YOLOv8) to detect vehicles in real-time. The system captures screenshots from traffic cameras, runs object detection to identify vehicles, and analyzes the data for potential accident indicators such as overlapping vehicles or unusual traffic patterns.
+## Overview
 
-## ✨ Features
+The system connects to any OpenCV-compatible video source (HLS stream, RTSP, local file), runs per-frame vehicle detection and tracking, and computes a continuous accident confidence score from five heuristic signals. Results are surfaced via a REST API that a frontend can call with a single button click.
 
-- **Automated Screenshot Capture**: Uses Selenium to access live traffic camera feeds
-- **Real-time Object Detection**: YOLOv8 identifies vehicles (cars, trucks, buses, motorcycles) and other objects
-- **Visual Annotations**: Saves images with bounding boxes around detected objects
-- **Traffic Analysis**: Analyzes vehicle positions, counts, and potential collisions
-- **Batch Processing**: Processes multiple frames and generates aggregate statistics
-- **Overlap Detection**: Identifies overlapping vehicles as potential collision indicators
+**Key capabilities:**
 
-## 📁 Project Structure
+- Real-time YOLOv8 vehicle detection (car, truck, bus, motorcycle)
+- Persistent vehicle identity across frames via DeepSORT tracking
+- Five-signal weighted accident score with EMA smoothing and hysteresis
+- Non-blocking FastAPI backend — POST a job, poll for results
+- Single shared YOLO model loaded at startup (no per-request reload)
+- Thread-safe in-memory job store with automatic TTL cleanup
+
+---
+
+## Architecture
+
+```
+Frontend
+   │
+   │  POST /detect-accident  { stream_url, max_frames }
+   ▼
+FastAPI (app/)
+   │  202 Accepted  { job_id }
+   │
+   ├──► BackgroundThread ──► detection_service.run_detection_job()
+   │                              │
+   │                              ├─ _open_video(stream_url)      [pipeline.py]
+   │                              ├─ _iter_video()                [pipeline.py]
+   │                              ├─ _run_yolo(model, frame)      [pipeline.py]
+   │                              ├─ DeepSortTracker.update()     [tracker.py]
+   │                              └─ AccidentScorer.update()      [accident_scorer.py]
+   │                                       │
+   │                                       └─► JobStore (in-memory)
+   │
+   │  GET /jobs/{job_id}
+   ▼
+   { status, accident_detected, peak_confidence, events: [...] }
+```
+
+The root-level detection modules (`pipeline.py`, `tracker.py`, `accident_scorer.py`, `config.py`) are **not modified** — the `app/` service layer wraps them.
+
+---
+
+## Project Structure
 
 ```
 Traffic-Accident-Detection/
-├── yolo_screenshot_detector.py    # Main capture & detection script
-├── detection_analysis_example.py  # Analysis script for captured images
-├── requirements.txt               # Python dependencies
-├── README.md                      # This file
-├── implementation_plan.md         # Future development roadmap
-├── open-url-sample.py            # Original simple screenshot script
 │
-├── captures/                      # Raw screenshots (auto-created)
-│   └── YYYY-MM-DD-HH-MM-SS.png
+├── pipeline.py                  ← CLI pipeline: YOLO + DeepSORT + AccidentScorer
+├── tracker.py                   ← DeepSortTracker wrapper
+├── accident_scorer.py           ← Rolling-window accident confidence scorer
+├── config.py                    ← All tunable detection parameters
+├── yolo_screenshot_detector.py  ← Original batch/screenshot-based detector
+├── detection_analysis_example.py
+├── requirements.txt
+├── README.md
 │
-├── captures_annotated/            # Annotated images with bounding boxes (auto-created)
-│   └── YYYY-MM-DD-HH-MM-SS.png
+├── app/                         ← FastAPI service
+│   ├── main.py                  ← App factory, lifespan (YOLO model load), CORS
+│   ├── api/
+│   │   ├── detect.py            ← POST /detect-accident, GET /jobs/{job_id}
+│   │   └── health.py            ← GET /health
+│   ├── core/
+│   │   ├── config.py            ← Pydantic BaseSettings (env / .env)
+│   │   └── logging.py           ← Structured logging setup
+│   ├── models/
+│   │   └── schemas.py           ← DetectRequest, DetectionEvent, DetectionResult
+│   ├── services/
+│   │   ├── detection_service.py ← Wraps pipeline.py; run_detection_job()
+│   │   └── job_store.py         ← Thread-safe job store with TTL reaper
+│   └── utils/
+│       └── cleanup.py           ← Temp file helpers (file-upload support)
 │
-└── yolov8n.pt                    # YOLOv8 nano model (auto-downloaded)
+├── pipeline_output/             ← Annotated frames saved by the pipeline
+└── captures/                    ← Snapshot test output
+    ├── originals/
+    ├── labeled/
+    └── scores/
 ```
 
-## 🔧 Prerequisites
+---
 
-Before you begin, ensure you have the following installed:
+## Prerequisites
 
-### 1. Python
-- **Version**: Python 3.8 or higher
-- **Download**: https://www.python.org/downloads/
-- **Verify installation**: 
-  ```bash
-  python --version
-  ```
+- **Python 3.10+**
+- **FFmpeg** available to OpenCV (required for HLS/RTSP streams)
+  - Windows: install via `winget install ffmpeg` or [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH
+  - Linux/macOS: `sudo apt install ffmpeg` / `brew install ffmpeg`
+- A CUDA-capable GPU is recommended for real-time performance but not required
 
-### 2. Web Browser
-- **Firefox** (recommended) - Script is configured for Firefox
-- Alternative: Chrome/Edge (requires script modification)
+---
 
-### 3. Browser Driver
-- **geckodriver** for Firefox
-  - **Download**: https://github.com/mozilla/geckodriver/releases
-  - **Installation**: 
-    - Extract the executable
-    - Add to your system PATH, OR
-    - Place in your Python Scripts directory
-
-**Verify geckodriver installation:**
-```bash
-geckodriver --version
-```
-
-## 🚀 Installation
-
-### Step 1: Clone or Download the Repository
+## Installation
 
 ```bash
-cd C:\git
+# 1. Clone the repository
 git clone <repository-url> Traffic-Accident-Detection
 cd Traffic-Accident-Detection
-```
 
-Or download and extract the ZIP file to `C:\git\Traffic-Accident-Detection`
+# 2. (Recommended) Create a virtual environment
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
-### Step 2: Install Python Dependencies
-
-```bash
+# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
-This will install:
-- **ultralytics** - YOLOv8 framework
-- **opencv-python** - Image processing
-- **numpy** - Numerical operations
-- **torch & torchvision** - Deep learning framework
-- **selenium** - Browser automation
-- **pillow** - Image handling
+The YOLO model (`yolo11x.pt`) is downloaded automatically by Ultralytics on first run.
 
-**Note**: First run will automatically download the YOLOv8n model (~6MB).
-
-### Step 3: Verify Installation
-
-Test that all packages are installed correctly:
+### Verify installation
 
 ```bash
-python -c "from ultralytics import YOLO; import cv2; from selenium import webdriver; print('✓ All packages installed successfully!')"
+python -c "from ultralytics import YOLO; import cv2; import fastapi; print('All packages OK')"
 ```
 
-## 🔍 How It Works
+---
 
-### Script 1: `yolo_screenshot_detector.py`
+## Running the API Server
 
-This is the main capture and detection script. Here's what it does:
-
-#### **Step-by-Step Process:**
-
-1. **Initialization**
-   - Loads the YOLOv8 nano model (`yolov8n.pt`)
-   - Clears previous captures from `captures/` and `captures_annotated/` folders
-   - Creates fresh directories
-
-2. **Browser Setup**
-   - Opens Firefox browser using Selenium
-   - Maximizes the window for full view
-   - Navigates to TDOT traffic camera URL
-   - Waits 5 seconds for page to fully load
-
-3. **Capture Loop** (runs 5 times by default, every 2 seconds)
-   - Takes a screenshot using Selenium's built-in capture (browser window only)
-   - Converts PNG bytes to OpenCV image format
-   - Saves raw screenshot to `captures/` folder
-
-4. **YOLO Detection**
-   - Runs YOLOv8 object detection on the captured image
-   - Identifies objects (cars, trucks, buses, motorcycles, people, etc.)
-   - Records bounding boxes, class labels, and confidence scores
-
-5. **Annotation & Saving**
-   - Draws bounding boxes with labels on the image
-   - Saves annotated image to `captures_annotated/` folder
-   - Prints detection details to console
-
-6. **Cleanup**
-   - Closes the browser
-   - Displays summary of saved files
-
-#### **Key Code Sections:**
-
-```python
-# Browser screenshot (not full screen)
-png_bytes = browser.get_screenshot_as_png()
-image = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
-
-# YOLO inference
-results = model(image)
-result = results[0]
-
-# Draw annotations
-annotated_frame = result.plot()
-```
-
-### Script 2: `detection_analysis_example.py`
-
-This script performs detailed analysis on captured images.
-
-#### **Step-by-Step Process:**
-
-1. **Image Discovery**
-   - Scans `captures_annotated/` folder for all PNG files
-   - Sorts images by filename (timestamp order)
-
-2. **Per-Image Analysis**
-   - Loads each annotated image
-   - Re-runs YOLO detection to extract data
-   - Identifies vehicle types and positions
-   - Calculates bounding box centers and areas
-
-3. **Overlap Detection**
-   - Compares all vehicle bounding boxes
-   - Calculates IoU (Intersection over Union)
-   - Flags overlaps > 20% as potential collisions
-   - Counts high-confidence detections
-
-4. **Aggregate Statistics**
-   - Total vehicles across all frames
-   - Average vehicles per frame
-   - Frame with most vehicles
-   - Frames with overlaps (⚠️ potential accidents)
-
-5. **Future Recommendations**
-   - Provides notes on implementing advanced accident detection
-   - Suggests frame-to-frame tracking
-   - Recommends custom model training
-
-#### **Key Analysis Features:**
-
-```python
-# IoU calculation for overlap detection
-def boxes_overlap(box1, box2, threshold=0.2):
-    # Calculates intersection over union
-    # Returns True if IoU > threshold
-```
-
-## 🎮 Usage
-
-### Quick Start
-
-1. **Run the capture script**:
-   ```bash
-   python yolo_screenshot_detector.py
-   ```
-   
-   **What happens:**
-   - Browser opens automatically
-   - Captures 5 screenshots over ~10 seconds
-   - Displays detections in console
-   - Saves images to folders
-   - Browser closes automatically
-
-2. **Analyze the captured images**:
-   ```bash
-   python detection_analysis_example.py
-   ```
-   
-   **What happens:**
-   - Processes all images in `captures_annotated/`
-   - Displays detailed analysis for each image
-   - Shows aggregate statistics
-   - Identifies potential accident indicators
-
-### Expected Console Output
-
-#### From `yolo_screenshot_detector.py`:
-
-```
-Clearing old images...
-✓ Folders ready for new captures
-
-Saved screenshot: captures\2025-11-13-0-8-37.png
-Saved annotated image: captures_annotated\2025-11-13-0-8-37.png
-
-Detections in frame 1:
-  Class: car (ID: 2), Confidence: 0.89, Box: (245.3, 156.7, 389.2, 234.5)
-  Class: truck (ID: 7), Confidence: 0.76, Box: (512.1, 178.3, 687.9, 298.4)
-  Class: car (ID: 2), Confidence: 0.82, Box: (123.4, 201.2, 245.6, 289.1)
-
-...
-
-✓ Processing complete!
-✓ Raw screenshots saved in: captures/
-✓ Annotated images saved in: captures_annotated/
-```
-
-#### From `detection_analysis_example.py`:
-
-```
-Found 5 images to analyze
-
-================================================================================
-ANALYZING IMAGE 1/5: 2025-11-13-0-8-37.png
-================================================================================
-
-Total detections: 12
-  Detection 1: car (conf: 0.89)
-  Detection 2: truck (conf: 0.76)
-  Detection 3: car (conf: 0.82)
-  ...
-
---- Analysis ---
-Vehicle count: 8
-  ✓ No significant overlaps detected
-  High-confidence vehicles (>0.7): 6
-
-...
-
-================================================================================
-SUMMARY ACROSS ALL FRAMES
-================================================================================
-
-Total images analyzed: 5
-Total vehicles detected: 37
-Total overlaps detected: 0
-Average vehicles per frame: 7.4
-
-Frame with most vehicles: 2025-11-13-0-8-42.png (9 vehicles)
-
-✓ No overlaps detected in any frame
-```
-
-## ⚙️ Configuration
-
-### Change Camera URL
-
-Edit line 29 in `yolo_screenshot_detector.py`:
-
-```python
-url = "https://smartway.tn.gov/allcams/camera/3245"  # Change camera ID here
-```
-
-**Finding other cameras:**
-- Visit: https://smartway.tn.gov/traffic
-- Browse available cameras
-- Copy the camera URL
-
-### Change Number of Captures
-
-Edit line 33 in `yolo_screenshot_detector.py`:
-
-```python
-for i in range(5):  # Change 5 to desired number of screenshots
-```
-
-### Change Capture Interval
-
-Edit line 34 in `yolo_screenshot_detector.py`:
-
-```python
-time.sleep(2)  # Change 2 to desired seconds between captures
-```
-
-### Use Different YOLO Model
-
-Edit line 13 in `yolo_screenshot_detector.py`:
-
-```python
-model = YOLO("yolov8n.pt")  # Options: yolov8n, yolov8s, yolov8m, yolov8l, yolov8x
-```
-
-**Model Comparison:**
-
-| Model    | Size  | Speed      | Accuracy | Use Case              |
-|----------|-------|------------|----------|-----------------------|
-| yolov8n  | ~6MB  | Fastest    | Good     | Real-time, testing    |
-| yolov8s  | ~22MB | Fast       | Better   | Balanced              |
-| yolov8m  | ~50MB | Moderate   | High     | Accuracy priority     |
-| yolov8l  | ~87MB | Slow       | Higher   | High-end systems      |
-| yolov8x  | ~131MB| Slowest    | Highest  | Maximum accuracy      |
-
-### Adjust Overlap Detection Threshold
-
-Edit line 88 in `detection_analysis_example.py`:
-
-```python
-def boxes_overlap(box1, box2, threshold=0.2):  # 0.2 = 20% IoU threshold
-```
-
-Lower threshold = more sensitive to overlaps  
-Higher threshold = only detects significant overlaps
-
-## 📊 Output
-
-### Folder Structure After Running
-
-```
-captures/
-├── 2025-11-13-0-8-34.png  # Raw screenshot
-├── 2025-11-13-0-8-37.png
-├── 2025-11-13-0-8-39.png
-├── 2025-11-13-0-8-42.png
-└── 2025-11-13-0-8-44.png
-
-captures_annotated/
-├── 2025-11-13-0-8-34.png  # Same image with bounding boxes
-├── 2025-11-13-0-8-37.png
-├── 2025-11-13-0-8-39.png
-├── 2025-11-13-0-8-42.png
-└── 2025-11-13-0-8-44.png
-```
-
-### What's in the Annotated Images?
-
-- **Bounding boxes** around detected objects
-- **Class labels** (car, truck, bus, etc.)
-- **Confidence scores** (0-1, shown as percentage)
-- **Color-coded boxes** by object class
-
-### Detection Classes
-
-YOLOv8 (COCO dataset) can detect 80 classes. Relevant for traffic:
-
-| Class ID | Name          | Description           |
-|----------|---------------|-----------------------|
-| 0        | person        | Pedestrians           |
-| 2        | car           | Standard vehicles     |
-| 3        | motorcycle    | Motorcycles           |
-| 5        | bus           | Buses                 |
-| 7        | truck         | Trucks                |
-| 9        | traffic light | Traffic signals       |
-| 11       | stop sign     | Stop signs            |
-
-## 🐛 Troubleshooting
-
-### Error: "geckodriver not found"
-
-**Problem**: Selenium can't find the browser driver.
-
-**Solution**:
-1. Download geckodriver: https://github.com/mozilla/geckodriver/releases
-2. Extract the executable
-3. Add to PATH:
-   - Windows: Add folder to System Environment Variables
-   - Or place `geckodriver.exe` in Python's Scripts folder
-
-### Error: "No module named 'ultralytics'"
-
-**Problem**: Dependencies not installed.
-
-**Solution**:
-```bash
-pip install -r requirements.txt
-```
-
-### Error: "CUDA not available" or Slow Performance
-
-**Problem**: Running on CPU instead of GPU.
-
-**Solution** (Optional - for GPU acceleration):
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-```
-
-**Note**: CPU is sufficient for this project. GPU provides faster processing.
-
-### Browser Opens but Shows Blank Screenshots
-
-**Problem**: Page not fully loaded before screenshot.
-
-**Solution**: Increase wait time (line 31 in `yolo_screenshot_detector.py`):
-```python
-time.sleep(10)  # Increase from 5 to 10 seconds
-```
-
-### Error: "No images found in captures_annotated/ folder"
-
-**Problem**: Haven't run the capture script yet.
-
-**Solution**: Run capture script first:
-```bash
-python yolo_screenshot_detector.py
-```
-
-### Firefox Not Opening
-
-**Problem**: Browser path not found or using wrong browser.
-
-**Solution 1** - Use Chrome instead:
-```python
-browser = webdriver.Chrome()  # Replace line 27
-```
-
-**Solution 2** - Specify Firefox path:
-```python
-from selenium.webdriver.firefox.service import Service
-service = Service('C:\\Path\\To\\Firefox\\firefox.exe')
-browser = webdriver.Firefox(service=service)
-```
-
-### Script Runs But No Detections
-
-**Problem**: Camera view may be empty or quality issue.
-
-**Check**:
-- Verify camera URL is working in regular browser
-- Check if it's nighttime (lower detection accuracy)
-- Try different camera angle/location
-- Lower confidence threshold if needed
-
-## 🚦 Tracking & Accident Detection (pipeline.py)
-
-The new `pipeline.py` adds **DeepSORT-based vehicle tracking** and a continuous
-**accident confidence score** on top of the existing YOLO detector.
-
-### How the Pipeline Works
-
-```
-HLS stream / video / images
-        │
-        ▼
-  YOLO detection          ← vehicle classes only (car, bus, truck, motorcycle)
-        │  (x1,y1,x2,y2, conf, class)
-        ▼
-  DeepSORT tracker        ← assigns persistent track IDs across frames
-        │  confirmed Track objects
-        ▼
-  AccidentScorer          ← rolling 5-second window of per-track history
-        │  score ∈ [0,1], accident_detected bool, metadata
-        ▼
-  Annotated output frame  ← bounding boxes + "ID N class" labels + score banner
-```
-
-### Installation
-
-Install the additional dependency:
+Run from the **project root** directory (so that `pipeline.py`, `tracker.py`, etc. are importable):
 
 ```bash
-pip install deep-sort-realtime>=1.3.2
-# or just re-run:
-pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-> `deep-sort-realtime` ships a built-in MobileNet Re-ID extractor — no extra
-> model download is required.
+> `--workers 1` is intentional. The YOLO model is not fork-safe; for horizontal scaling, run multiple containers rather than multiple workers in one process.
 
-### Running the Pipeline
+**Development mode** (auto-reload on file changes):
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+Once running, open **http://localhost:8000/docs** for the interactive Swagger UI.
+
+### Environment variables / `.env`
+
+Create a `.env` file in the project root to override defaults:
+
+```ini
+YOLO_MODEL=yolo11x.pt
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+MAX_CONCURRENT_JOBS=4
+JOB_TTL_SECONDS=3600
+LOG_LEVEL=INFO
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `YOLO_MODEL` | `yolo11x.pt` | Model weights file |
+| `CORS_ORIGINS` | `*` | Comma-separated frontend origins (`*` = allow all) |
+| `MAX_CONCURRENT_JOBS` | `4` | Rejects new jobs when at capacity (503) |
+| `JOB_TTL_SECONDS` | `3600` | How long completed job results stay in memory |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `API_PREFIX` | `` | Optional prefix for all routes, e.g. `/api/v1` |
+
+---
+
+## API Reference
+
+### `POST /detect-accident`
+
+Start an accident detection job against a stream URL.
+
+**Request body:**
+
+```json
+{
+  "stream_url": "https://example.com/live/stream.m3u8",
+  "max_frames": 300,
+  "save_frames": false
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stream_url` | string (URL) | required | Any source OpenCV can open: HLS, RTSP, MP4 |
+| `max_frames` | integer | `300` | Frame cap (~10 s at 30 fps). Range: 1–18000 |
+| `save_frames` | boolean | `false` | Write annotated frames to `pipeline_output/` |
+
+**Response `202 Accepted`:**
+
+```json
+{
+  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "pending",
+  "message": "Detection job queued. Poll GET /jobs/{job_id} for results."
+}
+```
+
+---
+
+### `GET /jobs/{job_id}`
+
+Poll for job status and results.
+
+**Response `200 OK`:**
+
+```json
+{
+  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "complete",
+  "stream_url": "https://example.com/live/stream.m3u8",
+  "frames_processed": 300,
+  "accident_detected": true,
+  "peak_confidence": 0.831,
+  "events": [
+    {
+      "frame_idx": 81,
+      "timestamp_sec": 8.1,
+      "accident_detected": true,
+      "confidence_score": 0.712,
+      "raw_score": 0.695,
+      "bounding_box": [412.0, 210.0, 587.0, 334.0],
+      "involved_track_ids": [3, 9],
+      "signal_values": {
+        "sudden_stop": 0.5,
+        "abrupt_decel": 0.45,
+        "collision_iou": 0.8,
+        "post_collision": 0.8,
+        "traffic_anomaly": 0.5
+      }
+    }
+  ],
+  "error": null,
+  "created_at": "2026-03-18T12:00:00Z",
+  "completed_at": "2026-03-18T12:00:18Z"
+}
+```
+
+**Job statuses:**
+
+| Status | Meaning |
+|---|---|
+| `pending` | Queued, not yet started |
+| `running` | Actively processing frames |
+| `complete` | Finished; inspect `events` and `accident_detected` |
+| `failed` | Error; see the `error` field |
+
+**Response `404`** if the job ID is unknown or has expired.
+
+---
+
+### `GET /health`
+
+Liveness and readiness check for load balancers / Docker HEALTHCHECK.
+
+**Response `200 OK`:**
+
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "active_jobs": 1,
+  "total_jobs": 3
+}
+```
+
+`status` is `"starting"` while the YOLO model is still loading.
+
+---
+
+### Example: full polling loop (Python)
+
+```python
+import httpx, time
+
+client = httpx.Client(base_url="http://localhost:8000")
+
+# 1. Submit job
+resp = client.post("/detect-accident", json={
+    "stream_url": "https://mcleansfs3.us-east-1.skyvdn.com/rtplive/R2_066/playlist.m3u8",
+    "max_frames": 300,
+})
+job_id = resp.json()["job_id"]
+print(f"Job started: {job_id}")
+
+# 2. Poll until complete
+while True:
+    result = client.get(f"/jobs/{job_id}").json()
+    print(f"  status={result['status']}  frames={result['frames_processed']}")
+    if result["status"] in ("complete", "failed"):
+        break
+    time.sleep(3)
+
+# 3. Inspect results
+print(f"Accident detected: {result['accident_detected']}")
+print(f"Peak confidence:   {result['peak_confidence']}")
+print(f"Events:            {len(result['events'])}")
+```
+
+---
+
+## Running the Pipeline Directly
+
+The CLI pipeline runs without the API server — useful for development and testing.
 
 ```bash
 # Default: live TDOT HLS stream
@@ -525,204 +335,204 @@ python pipeline.py --source frames/
 # Custom HLS / RTSP URL
 python pipeline.py --source https://example.com/stream.m3u8
 
-# Test mode — processes 300 frames, prints per-frame scores, then exits
-python pipeline.py --source video.mp4 --test
+# Test mode (process up to 300 frames, then exit)
+python pipeline.py --source video.mp4 --test --max-test-frames 100
 
-# Headless (no preview window — for servers)
-python pipeline.py --source video.mp4 --no-display
+# Headless (no cv2 preview window — for servers)
+python pipeline.py --source video.mp4 --test --no-display
 
-# Combine flags
-python pipeline.py --source video.mp4 --test --no-display --max-test-frames 100
+# Snapshot test: capture 5 frames, run full pipeline, save JSON + images to captures/
+python pipeline.py --snapshot-test
 ```
 
-### Console Output
+### Console output
 
 ```
 [00042] score=0.031  stop=0.00  decel=0.00  iou=0.00  post=0.00  anomaly=0.00  tracks=7
-[00043] score=0.044  stop=0.00  decel=0.12  iou=0.00  post=0.00  anomaly=0.00  tracks=7
 [00081] score=0.712 *** ACCIDENT DETECTED ***  stop=0.50  decel=0.45  iou=0.80  post=0.80  anomaly=0.50  tracks=5
          involved tracks: [3, 9]  region: (412.0, 210.0, 587.0, 334.0)
 ```
 
-Annotated frames are saved to `pipeline_output/` (JPEG by default).
+Annotated frames are written to `pipeline_output/` (JPEG, configurable).
 
-### Accident Confidence Signals
+---
 
-Five heuristic signals are computed from each track's rolling history window
-(last 5 seconds) and combined into a weighted score:
+## Configuration
+
+All detection parameters live in `config.py`. Edit once; every module picks up the change.
+
+### Detection / YOLO
+
+| Parameter | Default | Description |
+|---|---|---|
+| `YOLO_MODEL` | `yolo11x.pt` | Model weights (auto-downloaded) |
+| `VEHICLE_CLASSES` | `[2, 3, 5, 7]` | COCO IDs: car, motorcycle, bus, truck |
+| `DET_CONF_THRESHOLD` | `0.30` | Minimum YOLO detection confidence |
+| `INFERENCE_SIZE` | `1280` | YOLO input resolution (px) |
+
+### Tracking
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DEEPSORT_MAX_AGE` | `30` | Frames before a lost track is deleted |
+| `HISTORY_WINDOW_SECONDS` | `5` | Rolling history length per track |
+
+### Accident scoring
+
+| Parameter | Default | Description |
+|---|---|---|
+| `STOP_SPEED_THRESHOLD` | `5.0 px/frame` | Speed below which a vehicle is "stopped" |
+| `COLLISION_IOU_THRESHOLD` | `0.10` | Min box IoU to flag a collision event |
+| `EMA_ALPHA` | `0.30` | Score smoothing (higher = faster response) |
+| `HIGH_THRESHOLD` | `0.65` | Score that sets `accident_detected = True` |
+| `LOW_THRESHOLD` | `0.40` | Score that clears `accident_detected` (hysteresis) |
+
+### Output
+
+| Parameter | Default | Description |
+|---|---|---|
+| `OUTPUT_DIR` | `pipeline_output` | Directory for saved annotated frames |
+| `SAVE_FRAMES` | `True` | Persist annotated frames to disk |
+| `JPEG_QUALITY` | `85` | JPEG quality for saved frames |
+
+---
+
+## Detection Signals
+
+Five heuristic signals are computed from each vehicle's rolling history window and combined into a weighted confidence score:
 
 | Signal | Weight | Description |
 |---|---|---|
-| `sudden_stop` | 0.25 | A track's speed drops below threshold and stays near-zero |
+| `sudden_stop` | 0.25 | Track speed drops and stays near zero |
 | `abrupt_decel` | 0.20 | High negative mean acceleration over a short window |
-| `collision_iou` | 0.30 | Two tracks' boxes overlap **and** were converging beforehand |
+| `collision_iou` | 0.30 | Two tracks' boxes overlap **and** were converging |
 | `post_collision` | 0.15 | After overlap: track stationary or moving erratically |
-| `traffic_anomaly` | 0.10 | Multiple nearby vehicles also slow near the event region |
+| `traffic_anomaly` | 0.10 | Multiple nearby vehicles also slowing near the event region |
 
-**Scoring pipeline:**
+**Scoring:**
+
 ```
 raw_score      = Σ (weight × signal)
 smoothed_score = EMA(raw_score, α=0.30)
 
 accident_detected = True   when smoothed_score ≥ 0.65
-accident_detected = False  when smoothed_score < 0.40  (hysteresis)
+accident_detected = False  when smoothed_score < 0.40  (hysteresis prevents flicker)
 ```
 
-### Configuration
+---
 
-All parameters live in `config.py` — edit once and every module picks up the change:
+## Output
 
-| Parameter | Default | Description |
+### API job result
+
+See `GET /jobs/{job_id}` response above. Each `DetectionEvent` includes the frame index, timestamp, bounding box of the event region, involved track IDs, and all five signal values.
+
+### Pipeline direct output
+
+```
+pipeline_output/
+├── 000000.jpg   ← annotated frame 0 (bounding boxes + score banner)
+├── 000001.jpg
+└── ...
+
+captures/             (snapshot test only)
+├── originals/
+│   └── frame_00.jpg  ← raw frame
+├── labeled/
+│   └── frame_00.jpg  ← annotated frame
+└── scores/
+    ├── frame_00.json ← per-frame score + metadata
+    └── final_score.json
+```
+
+---
+
+## Troubleshooting
+
+### `RuntimeError: Cannot open source: ...`
+
+FFmpeg is required for HLS/RTSP streams. Verify FFmpeg is on the PATH:
+
+```bash
+ffmpeg -version
+```
+
+Reinstall OpenCV with FFmpeg support if needed:
+
+```bash
+pip install opencv-python --upgrade
+```
+
+### YOLO model not found
+
+On first run, Ultralytics downloads the model automatically. If the download fails:
+
+```bash
+python -c "from ultralytics import YOLO; YOLO('yolo11x.pt')"
+```
+
+### `503 Service Unavailable` on POST /detect-accident
+
+- **"YOLO model is not yet loaded"** — the server is still in its lifespan startup; wait a few seconds and retry.
+- **"Server is already running N job(s)"** — maximum concurrent jobs reached (`MAX_CONCURRENT_JOBS`). Wait for a job to complete or increase the limit in `.env`.
+
+### CUDA not available / slow performance
+
+GPU acceleration is optional. To enable it:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+### Low detection accuracy
+
+- Try a larger YOLO model: change `YOLO_MODEL=yolo11x.pt` in `config.py` (already the default)
+- Increase `INFERENCE_SIZE` to `1280` or `1920`
+- Lower `DET_CONF_THRESHOLD` to `0.20` for harder conditions (night, rain)
+
+---
+
+## Technical Details
+
+### Pipeline data flow (per frame)
+
+```
+VideoCapture frame (BGR)
+     │
+     ▼
+_run_yolo()          → [(x1,y1,x2,y2, conf, class_name), ...]
+     │
+     ▼
+DeepSortTracker.update()  → [Track(id, bbox, class), ...]
+     │
+     ▼
+AccidentScorer.update()   → (score: float, detected: bool, metadata: dict)
+     │
+     ▼
+_overlay_score()          → annotated frame (optional, saved to disk)
+```
+
+### Coordinate formats
+
+| Stage | Format | Description |
 |---|---|---|
-| `VEHICLE_CLASSES` | `[2,3,5,7]` | COCO IDs: car, motorcycle, bus, truck |
-| `DET_CONF_THRESHOLD` | `0.30` | Minimum YOLO detection confidence |
-| `HISTORY_WINDOW_SECONDS` | `5` | Rolling history length per track |
-| `DEEPSORT_MAX_AGE` | `30` | Frames before a lost track is deleted |
-| `STOP_SPEED_THRESHOLD` | `5.0 px/frame` | Speed below which a vehicle is "stopped" |
-| `COLLISION_IOU_THRESHOLD` | `0.10` | Min box IoU to flag a collision event |
-| `EMA_ALPHA` | `0.30` | Score smoothing strength (higher = faster) |
-| `HIGH_THRESHOLD` | `0.65` | Score level that sets `accident_detected = True` |
-| `LOW_THRESHOLD` | `0.40` | Score level that clears `accident_detected` |
-| `OUTPUT_DIR` | `pipeline_output` | Directory for saved annotated frames |
+| YOLO output | `xyxy` | `(x1, y1, x2, y2)` pixel corners |
+| DeepSORT input | `xywh` | `(left, top, width, height)` — converted inside `tracker.py` |
+| Scorer history | `cx, cy` | Box centre used for velocity and acceleration maths |
 
-### New Files
+### Scaling the API
 
-| File | Purpose |
-|---|---|
-| `pipeline.py` | Main entry point — CLI with `--source`, `--test`, `--no-display` |
-| `tracker.py` | `DeepSortTracker` — wraps DeepSort, handles xyxy ↔ xywh conversion |
-| `accident_scorer.py` | `AccidentScorer` — rolling history, five signals, EMA + hysteresis |
-| `config.py` | Central configuration for all modules |
+The service is designed for `--workers 1` because the YOLO model occupies GPU VRAM and is not safe to share across forked processes. For higher throughput:
 
-### Coordinate Format
-
-- **YOLO output**: `xyxy` (x1, y1, x2, y2) pixel coords
-- **DeepSORT input**: `xywh` (left, top, width, height) — converted inside `tracker.py`
-- **Internal history**: `cx, cy` (box centre) used for velocity and acceleration maths
+- Run multiple Docker containers behind a load balancer (one YOLO instance per container)
+- Replace the in-memory `JobStore` with Redis for shared state across instances
 
 ---
 
-## 🚀 Future Enhancements
+## License
 
-### Planned Features (See `implementation_plan.md`)
-
-1. **Frame-to-Frame Tracking**
-   - Track individual vehicles across frames
-   - Detect sudden stops or unusual movements
-   - Identify stationary vehicles in traffic lanes
-
-2. **Anomaly Detection**
-   - Establish baseline "normal traffic" patterns
-   - Flag unusual vehicle clustering
-   - Detect debris or people on roadway
-
-3. **Custom Model Training**
-   - Train YOLOv8 on accident-specific dataset
-   - Binary classification: accident vs. normal
-   - Use datasets like CADP or DADA-2000
-
-4. **Multi-Camera Support**
-   - Monitor multiple cameras simultaneously
-   - Parallel processing with threading
-   - Unified dashboard for all feeds
-
-5. **Real-Time Streaming**
-   - Replace screenshot approach with video stream
-   - Direct MJPEG/HLS stream capture
-   - Continuous monitoring (24/7)
-
-6. **Alert System**
-   - Email/SMS notifications on accident detection
-   - Desktop notifications
-   - Log file with timestamps and confidence scores
-
-7. **Web Dashboard**
-   - Live view of all cameras
-   - Historical incident log
-   - Statistics and analytics
-
-## 🔬 Technical Details
-
-### YOLOv8 Architecture
-
-- **Framework**: Ultralytics YOLOv8
-- **Model**: Nano (yolov8n.pt) - 3.2M parameters
-- **Input**: 640x640 RGB images (auto-resized)
-- **Output**: Bounding boxes, class labels, confidence scores
-- **Speed**: ~20-50ms per image (CPU), ~5-10ms (GPU)
-
-### Object Detection Pipeline
-
-```
-Input Image → Preprocessing → YOLOv8 CNN → Post-processing → Detections
-             (resize, norm)                  (NMS, filtering)   (boxes, labels)
-```
-
-### Overlap Detection Algorithm
-
-Uses **Intersection over Union (IoU)**:
-
-```
-IoU = Area of Overlap / Area of Union
-
-If IoU > threshold (0.2):
-    Flag as potential collision
-```
-
-### Performance Metrics
-
-- **Capture Rate**: ~1 frame per 2 seconds
-- **Processing Time**: ~100-500ms per frame (CPU)
-- **Detection Accuracy**: ~80-95% for vehicles (daylight, clear conditions)
-- **Memory Usage**: ~200-500MB
-
-### Dependencies Explained
-
-- **ultralytics**: Modern YOLOv8 implementation
-- **opencv-python**: Image processing, encoding/decoding
-- **numpy**: Array operations for image data
-- **torch**: PyTorch deep learning framework (YOLOv8 backend)
-- **selenium**: Browser automation for camera access
-- **pillow**: Additional image format support
-
-## 📝 License
-
-This project is for educational and research purposes. 
-
-**Important**:
-- Respect TDOT camera usage policies
-- Do not use for commercial purposes without permission
-- Traffic camera feeds are public but should be used responsibly
-
-## 🤝 Contributing
-
-To contribute:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## 📧 Support
-
-For issues or questions:
-- Check the [Troubleshooting](#troubleshooting) section
-- Review YOLOv8 documentation: https://docs.ultralytics.com/
-- Selenium documentation: https://selenium-python.readthedocs.io/
-
-## 🎓 Learning Resources
-
-- **YOLOv8 Tutorial**: https://docs.ultralytics.com/modes/predict/
-- **Computer Vision Basics**: https://opencv.org/
-- **Selenium WebDriver**: https://www.selenium.dev/documentation/
-- **COCO Dataset Classes**: https://cocodataset.org/#explore
+For educational and research purposes. Respect TDOT and any other camera operator's usage policies. Traffic camera feeds are public but should be used responsibly.
 
 ---
 
-**Project Status**: Active Development  
-**Last Updated**: November 2025  
-**Python Version**: 3.8+  
-**Platform**: Windows (with minor changes works on Linux/Mac)
-
----
-
-Made with ❤️ for traffic safety and computer vision learning
+**Python**: 3.10+ &nbsp;|&nbsp; **Platform**: Windows / Linux / macOS
