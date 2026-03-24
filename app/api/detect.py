@@ -71,7 +71,7 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         )
 
     stream_url = str(body.stream_url)
-    job = job_store.create(stream_url)
+    job = job_store.create(stream_url, max_frames=body.max_frames, save_frames=body.save_frames)
 
     logger.info(
         "Detection job queued  job_id=%s  stream_url=%s  max_frames=%d",

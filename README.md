@@ -287,6 +287,319 @@ Liveness and readiness check for load balancers / Docker HEALTHCHECK.
 
 ---
 
+### `GET /stats/overview`
+
+Dashboard-oriented aggregate metrics with metadata envelope.
+
+**Query params:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `history_days` | integer | `30` | Lookback window used to estimate `uptime_percent` |
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": {
+    "active_cameras": 2,
+    "total_cameras": 5,
+    "incidents_today": 3,
+    "detection_status": "active",
+    "uptime_percent": 98.42,
+    "active_jobs": 1,
+    "total_jobs": 14,
+    "refreshed_at": "2026-03-24T15:10:00Z",
+    "window_start": "2026-02-23T15:10:00Z",
+    "window_end": "2026-03-24T15:10:00Z"
+  },
+  "meta": {
+    "request_id": "84f9f050-a511-4d79-9f09-875b9c6f3d74",
+    "timestamp": "2026-03-24T15:10:00Z",
+    "duration_ms": 1.94,
+    "filters": { "history_days": 30 },
+    "pagination": null
+  },
+  "error": null
+}
+```
+
+---
+
+### `GET /incidents`
+
+Paginated incident feed derived from detection events.
+
+**Query params (all optional unless noted):**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `page` | integer | `1` | Page number |
+| `page_size` | integer | `20` | Items per page (`1..200`) |
+| `sort` | string | `-detected_at` | `-detected_at`, `detected_at`, `-confidence`, `confidence` |
+| `status` | string | none | `active` or `resolved` |
+| `job_id` | string | none | Filter incidents for one job |
+| `camera_id` | string | none | Filter by camera identifier |
+| `detection_type` | string | none | Currently `accident` |
+| `min_confidence` | float | none | Minimum confidence threshold (`0..1`) |
+| `start_time` | datetime | none | Inclusive lower bound |
+| `end_time` | datetime | none | Inclusive upper bound |
+
+**Example request:**
+
+```http
+GET /incidents?page=1&page_size=20&status=active&min_confidence=0.7
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": [
+    {
+      "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81",
+      "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "camera_id": "playlist",
+      "detection_type": "accident",
+      "status": "active",
+      "resolved": false,
+      "detected_at": "2026-03-24T15:08:10Z",
+      "confidence_score": 0.712,
+      "raw_score": 0.695,
+      "bounding_box": [412.0, 210.0, 587.0, 334.0],
+      "involved_track_ids": [3, 9]
+    }
+  ],
+  "meta": {
+    "request_id": "02ecbceb-28be-46c8-ba03-d57a8db4a314",
+    "timestamp": "2026-03-24T15:10:00Z",
+    "duration_ms": 1.01,
+    "filters": {
+      "status": "active",
+      "job_id": null,
+      "camera_id": null,
+      "detection_type": null,
+      "min_confidence": 0.7,
+      "start_time": null,
+      "end_time": null,
+      "sort": "-detected_at"
+    },
+    "pagination": {
+      "page": 1,
+      "page_size": 20,
+      "total_items": 1,
+      "total_pages": 1,
+      "has_next": false,
+      "has_prev": false
+    }
+  },
+  "error": null
+}
+```
+
+---
+
+### `GET /incidents/{incident_id}`
+
+Get full detail for a single incident.
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": {
+    "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81",
+    "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "camera_id": "playlist",
+    "detection_type": "accident",
+    "status": "resolved",
+    "resolved": true,
+    "detected_at": "2026-03-24T15:08:10Z",
+    "confidence_score": 0.712,
+    "raw_score": 0.695,
+    "bounding_box": [412.0, 210.0, 587.0, 334.0],
+    "involved_track_ids": [3, 9],
+    "frame_idx": 81,
+    "timestamp_sec": 8.1,
+    "signal_values": {
+      "sudden_stop": 0.5,
+      "abrupt_decel": 0.45,
+      "collision_iou": 0.8,
+      "post_collision": 0.8,
+      "traffic_anomaly": 0.5
+    },
+    "stream_url": "https://example.com/live/stream.m3u8",
+    "job_status": "complete",
+    "created_at": "2026-03-24T15:08:00Z",
+    "completed_at": "2026-03-24T15:08:18Z"
+  },
+  "meta": {
+    "request_id": "a09de3d7-c6a0-4f60-a422-377278094bcf",
+    "timestamp": "2026-03-24T15:10:01Z",
+    "duration_ms": 0.73,
+    "filters": { "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81" },
+    "pagination": null
+  },
+  "error": null
+}
+```
+
+---
+
+### `GET /jobs`
+
+Paginated lightweight job listing.
+
+**Example request:**
+
+```http
+GET /jobs?status=running&start_time=2026-03-24T00:00:00Z&end_time=2026-03-24T23:59:59Z
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": [
+    {
+      "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "status": "running",
+      "stream_url": "https://example.com/live/stream.m3u8",
+      "camera_id": "stream",
+      "created_at": "2026-03-24T15:08:00Z",
+      "completed_at": null,
+      "frames_processed": 120,
+      "peak_confidence": 0.73,
+      "event_count": 1,
+      "accident_detected": true,
+      "error": null
+    }
+  ],
+  "meta": {
+    "request_id": "65d4c2a3-70f1-4da8-b30f-b5706f6480b0",
+    "timestamp": "2026-03-24T15:10:01Z",
+    "duration_ms": 0.84,
+    "filters": {
+      "status": "running",
+      "start_time": "2026-03-24T00:00:00+00:00",
+      "end_time": "2026-03-24T23:59:59+00:00",
+      "sort": "-created_at"
+    },
+    "pagination": {
+      "page": 1,
+      "page_size": 20,
+      "total_items": 1,
+      "total_pages": 1,
+      "has_next": false,
+      "has_prev": false
+    }
+  },
+  "error": null
+}
+```
+
+---
+
+### `GET /jobs/{job_id}/status`
+
+Lightweight status endpoint for high-frequency frontend polling.
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": {
+    "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "status": "running",
+    "frames_processed": 120,
+    "event_count": 1,
+    "peak_confidence": 0.73,
+    "progress_percent": null,
+    "updated_at": "2026-03-24T15:10:01Z",
+    "created_at": "2026-03-24T15:08:00Z",
+    "completed_at": null
+  },
+  "meta": {
+    "request_id": "35377bf8-5f7a-49f2-bac9-89f987c80464",
+    "timestamp": "2026-03-24T15:10:01Z",
+    "duration_ms": 0.36,
+    "filters": { "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" },
+    "pagination": null
+  },
+  "error": null
+}
+```
+
+---
+
+### `GET /jobs/{job_id}/detections`
+
+Paginated detections for a single job (`detail=summary|full`).
+
+**Example request:**
+
+```http
+GET /jobs/{job_id}/detections?detail=full&page=1&page_size=50
+```
+
+**Response `200 OK` (full detail):**
+
+```json
+{
+  "data": [
+    {
+      "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81",
+      "frame_idx": 81,
+      "timestamp_sec": 8.1,
+      "detected_at": "2026-03-24T15:08:10Z",
+      "confidence_score": 0.712,
+      "raw_score": 0.695,
+      "bounding_box": [412.0, 210.0, 587.0, 334.0],
+      "involved_track_ids": [3, 9],
+      "signal_values": {
+        "sudden_stop": 0.5,
+        "abrupt_decel": 0.45,
+        "collision_iou": 0.8,
+        "post_collision": 0.8,
+        "traffic_anomaly": 0.5
+      }
+    }
+  ],
+  "meta": {
+    "request_id": "0ab6ea40-ff4a-4d14-bfa0-91f2ed503ef7",
+    "timestamp": "2026-03-24T15:10:01Z",
+    "duration_ms": 0.91,
+    "filters": {
+      "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "min_confidence": null,
+      "start_time": null,
+      "end_time": null,
+      "sort": "-detected_at",
+      "detail": "full"
+    },
+    "pagination": {
+      "page": 1,
+      "page_size": 50,
+      "total_items": 1,
+      "total_pages": 1,
+      "has_next": false,
+      "has_prev": false
+    }
+  },
+  "error": null
+}
+```
+
+---
+
+### Error behavior
+
+- `404` for unknown `job_id` and `incident_id`.
+- `422` for invalid query parameters (for example `page=0`, `min_confidence=1.2`).
+- Legacy endpoints (`/detect-accident`, `/jobs/{job_id}`, `/health`) retain their original response shapes.
+
+---
+
 ### Example: full polling loop (Python)
 
 ```python

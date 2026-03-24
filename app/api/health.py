@@ -45,8 +45,9 @@ async def health_check(request: Request) -> HealthResponse:
     - `total_jobs`   : total jobs in the store (pending + running + complete + failed)
     """
     model_loaded = getattr(request.app.state, "model", None) is not None
-    active = job_store.count_running()
-    total  = len(job_store.all_jobs())
+    counts = job_store.count_by_status()
+    active = counts["running"]
+    total = sum(counts.values())
 
     return HealthResponse(
         status="ok" if model_loaded else "starting",

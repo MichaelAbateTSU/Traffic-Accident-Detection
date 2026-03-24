@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.logging import configure_logging
-from app.api import detect, health
+from app.api import cameras, dashboard, detect, health, incidents, jobs, stats
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,11 @@ def create_app() -> FastAPI:
     prefix = settings.api_prefix  # e.g. "/api/v1" or "" (empty = no prefix)
     app.include_router(detect.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
+    app.include_router(dashboard.router, prefix=prefix)
+    app.include_router(stats.router, prefix=prefix)
+    app.include_router(incidents.router, prefix=prefix)
+    app.include_router(jobs.router, prefix=prefix)
+    app.include_router(cameras.router, prefix=prefix)
 
     return app
 
