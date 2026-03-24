@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         description="How long completed/failed jobs are retained in memory.",
     )
     max_concurrent_jobs: int = Field(
-        default=4,
+        default=10,
         ge=1,
         description="Refuse new jobs when this many are already running.",
     )
