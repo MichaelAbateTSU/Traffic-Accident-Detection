@@ -4,7 +4,7 @@ app/api/detect.py — Detection endpoints.
 Routes
 ------
 POST /detect-accident
-    Body : DetectRequest  { stream_url, max_frames, save_frames }
+    Body : DetectRequest  { stream_url, save_frames }
     Returns 202 JobAccepted { job_id, status, message }
 
 GET /jobs/{job_id}
@@ -26,6 +26,7 @@ from app.services.job_store import job_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["detection"])
+JOB_MAX_FRAMES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +72,12 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         )
 
     stream_url = str(body.stream_url)
-    job = job_store.create(stream_url, max_frames=body.max_frames, save_frames=body.save_frames)
+    max_frames = JOB_MAX_FRAMES
+    job = job_store.create(stream_url, max_frames=max_frames, save_frames=body.save_frames)
 
     logger.info(
         "Detection job queued  job_id=%s  stream_url=%s  max_frames=%d",
-        job.job_id, stream_url, body.max_frames,
+        job.job_id, stream_url, max_frames,
     )
 
     # Offload the blocking CPU work to a thread so the event loop stays free.
@@ -84,7 +86,7 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         run_detection_job,
         job.job_id,
         stream_url,
-        body.max_frames,
+        max_frames,
         model,
         body.save_frames,
     )

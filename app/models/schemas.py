@@ -23,12 +23,10 @@ class DetectRequest(BaseModel):
         examples=["https://example.com/live/stream.m3u8"],
     )
     max_frames: int = Field(
-        default=300,
+        default=5,
         ge=1,
-        le=18_000,
         description=(
-            "Maximum frames to process before stopping. "
-            "At 30 fps, 300 frames ≈ 10 seconds of stream."
+            "Deprecated. The API currently enforces a fixed 5-frame run for every job."
         ),
     )
     save_frames: bool = Field(
@@ -93,7 +91,6 @@ class DetectionResult(BaseModel):
     max_frames: int | None = Field(
         default=None,
         ge=1,
-        le=18_000,
         description="Max frames requested for the job (when known).",
     )
     save_frames: bool | None = Field(
