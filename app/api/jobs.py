@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from app.api.common import build_meta, start_timer
+from app.core.config import settings
 from app.models.schemas import (
     JobDetectionDetail,
     JobDetectionsResponse,
@@ -25,6 +26,40 @@ from app.services.job_store import job_store
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+def _base_origin(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
+def _artifacts_base_url(request: Request) -> str:
+    prefix = settings.api_prefix.rstrip("/")
+    if prefix:
+        return f"{_base_origin(request)}{prefix}/artifacts"
+    return f"{_base_origin(request)}/artifacts"
+
+
+def _to_absolute_url(request: Request, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.startswith("/"):
+        return f"{_base_origin(request)}{value}"
+    return f"{_base_origin(request)}/{value}"
+
+
+def _absolute_frames(request: Request, frames: list) -> list:
+    return [
+        frame.model_copy(
+            update={
+                "capture": _to_absolute_url(request, frame.capture),
+                "capture_annotated": _to_absolute_url(request, frame.capture_annotated),
+                "pipeline_output": _to_absolute_url(request, frame.pipeline_output),
+            }
+        )
+        for frame in frames
+    ]
+
+
 def _camera_id_from_url(stream_url: str) -> str:
     parsed = urlparse(stream_url)
     path = parsed.path.strip("/")
@@ -37,7 +72,7 @@ def _camera_id_from_url(stream_url: str) -> str:
     return parsed.netloc or "unknown-camera"
 
 
-def _to_job_summary(job) -> JobSummary:
+def _to_job_summary(job, request: Request) -> JobSummary:
     return JobSummary(
         job_id=job.job_id,
         status=job.status,
@@ -48,6 +83,8 @@ def _to_job_summary(job) -> JobSummary:
         frames_processed=job.frames_processed,
         peak_confidence=job.peak_confidence,
         event_count=len(job.events),
+        frames=_absolute_frames(request, job.frames),
+        artifacts_base_url=_artifacts_base_url(request),
         accident_detected=job.accident_detected,
         error=job.error,
     )
@@ -59,6 +96,7 @@ def _to_job_summary(job) -> JobSummary:
     summary="List jobs with filtering and pagination",
 )
 async def list_jobs(
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     sort: Literal["-created_at", "created_at", "-completed_at", "completed_at"] = Query(
@@ -80,7 +118,7 @@ async def list_jobs(
         page_size=page_size,
         sort=sort,
     )
-    data = [_to_job_summary(job) for job in jobs]
+    data = [_to_job_summary(job, request) for job in jobs]
     return JobListResponse(
         data=data,
         meta=build_meta(
@@ -105,7 +143,7 @@ async def list_jobs(
     summary="Get lightweight status for a single job",
     responses={404: {"description": "Job not found."}},
 )
-async def get_job_status(job_id: str) -> JobStatusResponse:
+async def get_job_status(job_id: str, request: Request) -> JobStatusResponse:
     started = start_timer()
     job = job_store.get(job_id)
     if job is None:
@@ -129,6 +167,8 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
         total_detections=len(job.events),
         totalDetections=len(job.events),
         peak_confidence=job.peak_confidence,
+        frames=_absolute_frames(request, job.frames),
+        artifacts_base_url=_artifacts_base_url(request),
         progress_percent=progress_percent,
         progress=progress_percent,
         updated_at=job.completed_at or datetime.now(tz=timezone.utc),

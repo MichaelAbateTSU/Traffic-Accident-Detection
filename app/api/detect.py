@@ -29,6 +29,27 @@ router = APIRouter(tags=["detection"])
 JOB_MAX_FRAMES = 5
 
 
+def _base_origin(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
+def _artifacts_base_url(request: Request) -> str:
+    prefix = settings.api_prefix.rstrip("/")
+    if prefix:
+        return f"{_base_origin(request)}{prefix}/artifacts"
+    return f"{_base_origin(request)}/artifacts"
+
+
+def _to_absolute_url(request: Request, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.startswith("/"):
+        return f"{_base_origin(request)}{value}"
+    return f"{_base_origin(request)}/{value}"
+
+
 # ---------------------------------------------------------------------------
 # POST /detect-accident
 # ---------------------------------------------------------------------------
@@ -91,7 +112,11 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         body.save_frames,
     )
 
-    return JobAccepted(job_id=job.job_id)
+    return JobAccepted(
+        job_id=job.job_id,
+        frames=[],
+        artifacts_base_url=_artifacts_base_url(request),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +131,7 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         404: {"description": "Job not found (unknown or expired)."},
     },
 )
-async def get_job(job_id: str) -> DetectionResult:
+async def get_job(job_id: str, request: Request) -> DetectionResult:
     """
     Return the current state of a detection job.
 
@@ -124,4 +149,20 @@ async def get_job(job_id: str) -> DetectionResult:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job '{job_id}' not found. It may have expired or never existed.",
         )
-    return job
+    absolute_frames = [
+        frame.model_copy(
+            update={
+                "capture": _to_absolute_url(request, frame.capture),
+                "capture_annotated": _to_absolute_url(request, frame.capture_annotated),
+                "pipeline_output": _to_absolute_url(request, frame.pipeline_output),
+            }
+        )
+        for frame in job.frames
+    ]
+
+    return job.model_copy(
+        update={
+            "frames": absolute_frames,
+            "artifacts_base_url": _artifacts_base_url(request),
+        }
+    )

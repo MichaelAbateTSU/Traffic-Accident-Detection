@@ -78,6 +78,24 @@ class DetectionEvent(BaseModel):
     signal_values: SignalValues
 
 
+class FrameImages(BaseModel):
+    """Image URLs produced for a single processed frame."""
+
+    frame_index: int = Field(ge=0)
+    capture: str | None = Field(
+        default=None,
+        description="URL to the raw captured frame image.",
+    )
+    capture_annotated: str | None = Field(
+        default=None,
+        description="URL to the tracker-annotated frame image.",
+    )
+    pipeline_output: str | None = Field(
+        default=None,
+        description="URL to the final pipeline output image.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level response
 # ---------------------------------------------------------------------------
@@ -106,6 +124,14 @@ class DetectionResult(BaseModel):
         description="Highest EMA-smoothed score observed during the job.",
     )
     events: list[DetectionEvent] = Field(default_factory=list)
+    frames: list[FrameImages] = Field(
+        default_factory=list,
+        description="Per-frame image URLs generated during this job.",
+    )
+    artifacts_base_url: str | None = Field(
+        default=None,
+        description="Base URL where job frame artifacts are served.",
+    )
     error: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
@@ -121,6 +147,14 @@ class JobAccepted(BaseModel):
     job_id: str
     status: Literal["pending"] = "pending"
     message: str = "Detection job queued. Poll GET /jobs/{job_id} for results."
+    frames: list[FrameImages] = Field(
+        default_factory=list,
+        description="Initially empty list of frame image URLs for this job.",
+    )
+    artifacts_base_url: str | None = Field(
+        default=None,
+        description="Base URL where job frame artifacts are served.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +290,8 @@ class JobSummary(BaseModel):
     frames_processed: int = Field(ge=0)
     peak_confidence: float = Field(ge=0.0, le=1.0)
     event_count: int = Field(ge=0)
+    frames: list[FrameImages] = Field(default_factory=list)
+    artifacts_base_url: str | None = None
     accident_detected: bool = False
     error: str | None = None
 
@@ -270,6 +306,8 @@ class JobStatusSummary(BaseModel):
     total_detections: int = Field(ge=0, description="Alias of event_count for UI convenience.")
     totalDetections: int = Field(ge=0, description="camelCase alias of total_detections.")
     peak_confidence: float = Field(ge=0.0, le=1.0)
+    frames: list[FrameImages] = Field(default_factory=list)
+    artifacts_base_url: str | None = None
     progress_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     progress: float | None = Field(default=None, ge=0.0, le=100.0, description="Alias of progress_percent.")
     updated_at: datetime

@@ -9,9 +9,14 @@ from app.models.schemas import (
 
 class ApiContractTests(unittest.TestCase):
     def test_legacy_route_models_unchanged(self):
-        self.assertSetEqual(set(JobAccepted.model_fields.keys()), {"job_id", "status", "message"})
+        self.assertSetEqual(
+            set(JobAccepted.model_fields.keys()),
+            {"job_id", "status", "message", "frames", "artifacts_base_url"},
+        )
         self.assertIn("events", DetectionResult.model_fields)
         self.assertIn("peak_confidence", DetectionResult.model_fields)
+        self.assertIn("frames", DetectionResult.model_fields)
+        self.assertIn("artifacts_base_url", DetectionResult.model_fields)
 
     def test_new_resource_routes_registered(self):
         root = Path(__file__).resolve().parents[1]
@@ -31,6 +36,8 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("app.include_router(stats.router, prefix=prefix)", main_py)
         self.assertIn("app.include_router(incidents.router, prefix=prefix)", main_py)
         self.assertIn("app.include_router(jobs.router, prefix=prefix)", main_py)
+        self.assertIn("app.mount(", main_py)
+        self.assertIn("artifacts", main_py)
 
         # New endpoint paths exist with explicit route decorators.
         self.assertIn('"/overview"', stats_py)

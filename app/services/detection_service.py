@@ -25,8 +25,12 @@ by the caller (see api/detect.py) so it does not block the event loop.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # INTEGRATION POINT — root-level pipeline modules
@@ -45,7 +49,8 @@ from accident_scorer import AccidentScorer                          # noqa: E402
 import config as pipeline_config                                    # noqa: E402
 # ---------------------------------------------------------------------------
 
-from app.models.schemas import DetectionEvent, DetectionResult, SignalValues
+from app.core.config import settings
+from app.models.schemas import DetectionEvent, FrameImages, SignalValues
 from app.services.job_store import job_store
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,118 @@ logger = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _artifact_base_url() -> str:
+    prefix = settings.api_prefix.rstrip("/")
+    if prefix:
+        return f"{prefix}/artifacts"
+    return "/artifacts"
+
+
+def _job_output_dirs(job_id: str) -> dict[str, str]:
+    base_dir = os.path.join(pipeline_config.OUTPUT_DIR, job_id)
+    return {
+        "base": base_dir,
+        "capture": os.path.join(base_dir, "capture"),
+        "capture_annotated": os.path.join(base_dir, "capture_annotated"),
+        "pipeline_output": os.path.join(base_dir, "pipeline_output"),
+    }
+
+
+def _ensure_job_output_dirs(job_id: str) -> dict[str, str]:
+    dirs = _job_output_dirs(job_id)
+    os.makedirs(dirs["capture"], exist_ok=True)
+    os.makedirs(dirs["capture_annotated"], exist_ok=True)
+    os.makedirs(dirs["pipeline_output"], exist_ok=True)
+    return dirs
+
+
+def _save_frame_triplet(
+    job_id: str,
+    frame_idx: int,
+    frame,
+    capture_annotated,
+    pipeline_output,
+) -> FrameImages:
+    import cv2
+
+    dirs = _ensure_job_output_dirs(job_id)
+    file_name = f"{frame_idx:06d}.jpg"
+
+    capture_path = os.path.join(dirs["capture"], file_name)
+    capture_annotated_path = os.path.join(dirs["capture_annotated"], file_name)
+    pipeline_output_path = os.path.join(dirs["pipeline_output"], file_name)
+
+    cv2.imwrite(
+        capture_path,
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
+    )
+    cv2.imwrite(
+        capture_annotated_path,
+        capture_annotated,
+        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
+    )
+    cv2.imwrite(
+        pipeline_output_path,
+        pipeline_output,
+        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
+    )
+
+    base_url = _artifact_base_url()
+    return FrameImages(
+        frame_index=frame_idx,
+        capture=f"{base_url}/{job_id}/capture/{file_name}",
+        capture_annotated=f"{base_url}/{job_id}/capture_annotated/{file_name}",
+        pipeline_output=f"{base_url}/{job_id}/pipeline_output/{file_name}",
+    )
+
+
+def _prune_old_job_artifacts() -> None:
+    """
+    Keep artifact folders for active jobs plus the N most recent terminal jobs.
+
+    This bounds disk usage while avoiding deletion of folders that may still be
+    written by running/pending jobs.
+    """
+    root = Path(pipeline_config.OUTPUT_DIR)
+    if not root.exists():
+        return
+
+    all_jobs = job_store.all_jobs()
+    active_job_ids = {
+        job.job_id
+        for job in all_jobs
+        if job.status in ("pending", "running")
+    }
+    terminal_jobs = sorted(
+        [job for job in all_jobs if job.status in ("complete", "failed")],
+        key=lambda job: job.completed_at or job.created_at,
+        reverse=True,
+    )
+    keep_terminal = max(int(settings.job_artifact_retention_count), 1)
+    keep_job_ids = active_job_ids | {job.job_id for job in terminal_jobs[:keep_terminal]}
+
+    removed: list[str] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            uuid.UUID(entry.name)
+        except ValueError:
+            # Ignore non-job folders in OUTPUT_DIR.
+            continue
+        if entry.name in keep_job_ids:
+            continue
+        try:
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+        except OSError as exc:
+            logger.warning("Could not prune artifact folder %s: %s", entry, exc)
+
+    if removed:
+        logger.info("Pruned artifact folders for %d old job(s): %s", len(removed), removed)
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +202,10 @@ def run_detection_job(
     logger.info("Job started  job_id=%s  stream_url=%s  max_frames=%d",
                 job_id, stream_url, max_frames)
 
-    job_store.update(job_id, status="running")
+    job_store.update(job_id, status="running", frames=[])
 
     events: list[DetectionEvent] = []
+    frame_images: list[FrameImages] = []
     frames_processed = 0
     peak_confidence = 0.0
     t_job_start = time.monotonic()
@@ -123,6 +241,24 @@ def run_detection_job(
             score, detected, meta = scorer.update(tracks, frames_processed)
             # ----------------------------------------------------------
 
+            capture_annotated = tracker.draw_tracks(frame, tracks)
+            pipeline_output = capture_annotated
+            if pipeline_config.OVERLAY_SCORE:
+                from pipeline import _overlay_score
+
+                pipeline_output = _overlay_score(
+                    capture_annotated.copy(), score, detected, frames_processed
+                )
+            frame_images.append(
+                _save_frame_triplet(
+                    job_id=job_id,
+                    frame_idx=frames_processed,
+                    frame=frame,
+                    capture_annotated=capture_annotated,
+                    pipeline_output=pipeline_output,
+                )
+            )
+
             if score > peak_confidence:
                 peak_confidence = score
 
@@ -141,17 +277,17 @@ def run_detection_job(
                     signal_values=SignalValues(**meta["signal_values"]),
                 ))
 
-            if save_frames:
-                _save_annotated_frame(frame, tracker, tracks, scorer,
-                                      score, detected, frames_processed, model)
-
             frames_processed += 1
 
             # Keep the job store up to date while the job is running so
-            # polling clients can see incremental progress.
-            if frames_processed % 30 == 0:
-                job_store.update(job_id, frames_processed=frames_processed,
-                                 peak_confidence=round(peak_confidence, 4))
+            # polling clients can see incremental progress and frame URLs.
+            job_store.update(
+                job_id,
+                frames_processed=frames_processed,
+                peak_confidence=round(peak_confidence, 4),
+                events=list(events),
+                frames=list(frame_images),
+            )
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unhandled error in job %s", job_id)
@@ -170,8 +306,10 @@ def run_detection_job(
         accident_detected=accident_detected,
         peak_confidence=round(peak_confidence, 4),
         events=events,
+        frames=frame_images,
         completed_at=_utcnow(),
     )
+    _prune_old_job_artifacts()
     logger.info(
         "Job complete  job_id=%s  frames=%d  accident=%s  peak=%.3f  events=%d",
         job_id, frames_processed, accident_detected, peak_confidence, len(events),
@@ -190,23 +328,6 @@ def _fail_job(job_id: str, error: str) -> None:
         error=error,
         completed_at=_utcnow(),
     )
+    _prune_old_job_artifacts()
 
 
-def _save_annotated_frame(frame, tracker, tracks, scorer, score, detected,
-                          frame_idx: int, model) -> None:
-    """
-    Optionally persist an annotated frame to disk.
-    Mirrors the save logic in pipeline.run_pipeline().
-    """
-    import os
-    import cv2
-    from pipeline import _overlay_score
-
-    os.makedirs(pipeline_config.OUTPUT_DIR, exist_ok=True)
-    annotated = tracker.draw_tracks(frame, tracks)
-    annotated = _overlay_score(annotated, score, detected, frame_idx)
-
-    fname = f"{frame_idx:06d}.jpg"
-    out_path = os.path.join(pipeline_config.OUTPUT_DIR, fname)
-    cv2.imwrite(out_path, annotated,
-                [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY])

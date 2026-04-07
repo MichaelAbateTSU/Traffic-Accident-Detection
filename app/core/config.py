@@ -61,6 +61,11 @@ class Settings(BaseSettings):
         ge=1,
         description="Refuse new jobs when this many are already running.",
     )
+    job_artifact_retention_count: int = Field(
+        default=10,
+        ge=1,
+        description="How many most-recent terminal jobs keep local artifact images.",
+    )
 
     # ------------------------------------------------------------------
     # Logging

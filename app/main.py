@@ -26,6 +26,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -127,6 +128,17 @@ def create_app() -> FastAPI:
     # Routers
     # ------------------------------------------------------------------
     prefix = settings.api_prefix  # e.g. "/api/v1" or "" (empty = no prefix)
+    import config as pipeline_config  # root-level config
+    import os
+
+    os.makedirs(pipeline_config.OUTPUT_DIR, exist_ok=True)
+    artifacts_mount = f"{prefix}/artifacts" if prefix else "/artifacts"
+    app.mount(
+        artifacts_mount,
+        StaticFiles(directory=pipeline_config.OUTPUT_DIR),
+        name="artifacts",
+    )
+
     app.include_router(detect.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
     app.include_router(dashboard.router, prefix=prefix)
