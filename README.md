@@ -1185,8 +1185,9 @@ their normal expiry, but post-collision stationary/direction evidence must
 come from a current uninterrupted history. Score EMA decays over skipped
 intervals with zero evidence, then incorporates only the current observation's
 interval. An explicit empty-track update also contributes zero evidence.
-Stop-only event focus selects current observed tracks, not stale retained
-boxes. Intentionally remembered collision participants/regions remain in
+Stop-only event focus selects current observed tracks whose histories actually
+contribute the stop signal, not stale retained boxes, new tracks or tracks
+that only just slowed down. Intentionally remembered collision participants/regions remain in
 event metadata until their normal expiry; legacy focus selection is unchanged.
 
 Tests preserve **exact dense 10-FPS legacy scores, signals and hysteresis**

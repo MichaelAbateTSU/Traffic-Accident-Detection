@@ -728,6 +728,35 @@ def test_experimental_remembered_collision_focus_intentionally_retains_absent_pa
     assert meta["event_region"] == (-20, -20, 1025, 20)
 
 
+@pytest.mark.parametrize("experimental", [False, True])
+@pytest.mark.parametrize("ineligible_kind", ["new_track", "recently_moving"])
+def test_stop_focus_selects_actual_contributor_not_current_zero_speed_track(experimental, ineligible_kind):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    for idx in range(5):
+        current = tracks_at([(1000 + idx, 0)])
+        current[0].track_id = 2
+        if ineligible_kind == "recently_moving":
+            other = tracks_at([(10 * idx if idx < 4 else 18.24, 1000)])
+            other[0].track_id = 3
+            current += other
+        scorer.update(current, idx)
+    current = tracks_at([(1005, 0), (0 if ineligible_kind == "new_track" else 18.24, 1000)])
+    current[0].track_id = 2
+    current[1].track_id = 3
+    _, _, meta = scorer.update(current, 5)
+    rec = scorer._records[3]
+    assert rec.history[-1].speed < scorer._records[2].history[-1].speed
+    if ineligible_kind == "new_track":
+        assert len(rec.history) == 1
+    else:
+        assert any(s.speed >= config.STOP_SPEED_THRESHOLD for s in scorer._recent(rec, 5))
+    assert meta["signal_values"]["sudden_stop"] == 0.5
+    assert meta["involved_track_ids"] == ([2] if experimental else [3])
+    assert meta["event_region"] == ((985, -20, 1025, 20) if experimental
+                                    else tuple(current[1].to_tlbr()))
+
+
 @pytest.mark.parametrize("entry", ["production", "cli", "evaluation"])
 @pytest.mark.parametrize("experimental", [False, True])
 def test_zero_detections_with_confirmed_predicted_tracks_is_handled_at_real_entry_points(

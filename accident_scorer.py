@@ -367,30 +367,22 @@ class AccidentScorer:
         Returns the fraction of tracks that have been near-stationary for at
         least STOP_MIN_FRAMES frames.  Clipped to [0, 1].
         """
-        threshold = config.STOP_SPEED_THRESHOLD
-        min_frames = config.STOP_MIN_FRAMES
-
-        stopped_count = 0
-        eligible = 0
-
-        for rec in self._records.values():
-            if not self._observed_now(rec):
-                continue
-            recent = self._recent(rec, min_frames) if rec.history else []
-            if self._experimental:
-                if not self._has_duration(recent, min_frames):
-                    continue
-            elif len(rec.history) < min_frames:
-                continue
-            eligible += 1
-            if all(s.speed < threshold for s in recent):
-                stopped_count += 1
-
-        if eligible == 0:
-            return 0.0
+        stopped_count = sum(self._contributes_sudden_stop(rec) for rec in self._records.values())
         # Normalise: 1 stopped vehicle out of N = partial signal
         # Full signal (1.0) when ≥2 vehicles are stopped simultaneously
         return min(1.0, stopped_count / 2.0)
+
+    def _contributes_sudden_stop(self, rec: _TrackRecord) -> bool:
+        if not self._observed_now(rec):
+            return False
+        min_frames = config.STOP_MIN_FRAMES
+        recent = self._recent(rec, min_frames) if rec.history else []
+        if self._experimental:
+            if not self._has_duration(recent, min_frames):
+                return False
+        elif len(rec.history) < min_frames:
+            return False
+        return all(s.speed < config.STOP_SPEED_THRESHOLD for s in recent)
 
     # ---- Signal 2: Abrupt deceleration --------------------------------
 
@@ -677,7 +669,7 @@ class AccidentScorer:
             # Fall back: find the slowest track as focal point
             slowest = min(
                 ((tid, rec) for tid, rec in self._records.items()
-                 if self._observed_now(rec)),
+                 if not self._experimental or self._contributes_sudden_stop(rec)),
                 key=lambda kv: kv[1].history[-1].speed if kv[1].history else 1e9,
                 default=(None, None),
             )
