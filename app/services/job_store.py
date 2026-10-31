@@ -204,9 +204,17 @@ class JobStore:
     def _delete_job(self, jid: str) -> None:
         if self._db is not None:
             with self._db:
-                self._db.execute("DELETE FROM jobs WHERE id = ?", (jid,))
-                self._db.execute("DELETE FROM overrides WHERE id LIKE ?", (f"{jid}:%",))
+                self._delete_job_rows_locked(jid)
+        self._forget_job_locked(jid)
+
+    def _delete_job_rows_locked(self, jid: str) -> None:
+        assert self._db is not None
+        self._db.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+        self._db.execute("DELETE FROM overrides WHERE id LIKE ?", (f"{jid}:%",))
+
+    def _forget_job_locked(self, jid: str) -> None:
         del self._jobs[jid]
+        self._terminal_recovery.pop(jid, None)
         for iid in [key for key in self._incident_overrides if key.split(":", 1)[0] == jid]:
             del self._incident_overrides[iid]
         # Only store-generated UUID directories may be removed.
@@ -237,21 +245,46 @@ class JobStore:
             created_at=_utcnow(),
         )
         with self._lock:
-            self._make_room_locked(capacity)
-            self._persist_job(job)
-            self._jobs[job.job_id] = job
+            evictions = self._admission_evictions_locked(capacity)
+            self._admit_job_locked(job, evictions)
         logger.debug("Job created  job_id=%s", job.job_id)
         return job
 
-    def _make_room_locked(self, capacity: int | None) -> None:
+    def _admission_evictions_locked(self, capacity: int | None) -> list[str]:
         active = sum(j.status in ("pending", "running") for j in self._jobs.values())
         if capacity is not None and active >= capacity:
             raise JobCapacityError("The running/pending job capacity is exhausted. Please retry later.")
-        while len(self._jobs) >= settings.max_retained_jobs:
-            terminal = [j for j in self._jobs.values() if j.status in ("complete", "failed")]
-            if not terminal:
-                raise JobCapacityError("The job store is at capacity. Please retry later.")
-            self._delete_job(min(terminal, key=lambda j: j.completed_at or j.created_at).job_id)
+        needed = max(0, len(self._jobs) - settings.max_retained_jobs + 1)
+        terminal = sorted(
+            (j for j in self._jobs.values() if j.status in ("complete", "failed")),
+            key=lambda j: j.completed_at or j.created_at,
+        )
+        if len(terminal) < needed:
+            raise JobCapacityError("The job store is at capacity. Please retry later.")
+        return [job.job_id for job in terminal[:needed]]
+
+    def _admit_job_locked(
+        self, job: DetectionResult, evictions: list[str],
+        receipt: tuple[str, str, datetime] | None = None,
+    ) -> None:
+        if self._db is not None:
+            # Eviction, replacement and optional receipt are one transaction.
+            with self._db:
+                for jid in evictions:
+                    self._delete_job_rows_locked(jid)
+                self._db.execute("INSERT INTO jobs VALUES (?, ?)", (job.job_id, job.model_dump_json()))
+                if receipt is not None:
+                    identity, fingerprint, expiry = receipt
+                    self._db.execute(
+                        "INSERT INTO submission_receipts VALUES (?, ?, ?, ?)",
+                        (identity, fingerprint, job.job_id, expiry.isoformat()),
+                    )
+        self._jobs[job.job_id] = job
+        if receipt is not None:
+            identity, fingerprint, expiry = receipt
+            self._submission_receipts[identity] = (fingerprint, job.job_id, expiry)
+        for jid in evictions:
+            self._forget_job_locked(jid)
 
     def _lookup_submission_locked(
         self, identity: str, fingerprint: str | None,
@@ -301,21 +334,12 @@ class JobStore:
             self._reap_receipts_locked(now)
             if len(self._submission_receipts) >= settings.max_submission_receipts:
                 raise JobCapacityError("The submission receipt store is full. Please retry later.")
-            self._make_room_locked(capacity)
+            evictions = self._admission_evictions_locked(capacity)
             job = DetectionResult(
                 job_id=_new_job_id(), status="pending", stream_url=stream_url,
                 max_frames=max_frames, save_frames=save_frames, created_at=now,
             )
-            if self._db is not None:
-                # Do not use _persist_job here: its commit would split this reservation.
-                with self._db:
-                    self._db.execute("INSERT INTO jobs VALUES (?, ?)", (job.job_id, job.model_dump_json()))
-                    self._db.execute(
-                        "INSERT INTO submission_receipts VALUES (?, ?, ?, ?)",
-                        (identity, fingerprint, job.job_id, expires_at.isoformat()),
-                    )
-            self._jobs[job.job_id] = job
-            self._submission_receipts[identity] = (fingerprint, job.job_id, expires_at)
+            self._admit_job_locked(job, evictions, (identity, fingerprint, expires_at))
             return job, False, expires_at
 
     def _identify_submission_locked(self, key: str, now: datetime) -> tuple[str, datetime]:

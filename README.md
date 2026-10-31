@@ -306,6 +306,14 @@ source URLs, which may contain signed query parameters.
 identity's embedded timestamp**, not first acceptance or job completion.
 Retries do not refresh it; identity timestamps up to 60 seconds ahead are tolerated.
 Results may disappear sooner because of `JOB_TTL_SECONDS` or `MAX_RETAINED_JOBS`.
+At the retained-job limit, eviction of old terminal job/override rows commits
+in the same SQLite transaction as the replacement job and optional receipt.
+A failed replacement insert leaves the previous history, overrides and artifacts
+intact. Successful admissions preserve the oldest-terminal eviction policy;
+in-memory removal and artifact deletion occur only after commit. Artifact
+cleanup failures are logged. A crash after commit but before cleanup may leave
+orphan artifact directories; SQLite atomicity does not make filesystem deletion
+transactional or promise crash-proof artifact cleanup.
 Separate compact receipts survive that removal until identity expiry, so early
 result eviction returns 410 instead of creating duplicate work. At
 `MAX_SUBMISSION_RECEIPTS`, new keyed requests fail with 503; unexpired receipts

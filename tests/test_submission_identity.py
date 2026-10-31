@@ -1,6 +1,7 @@
 """Durable receipt atomicity, bounded retention, and unsafe reuse rejection."""
 
 import sqlite3
+import json
 import subprocess
 import sys
 import time
@@ -482,3 +483,67 @@ def test_terminal_recovery_does_not_overwrite_already_completed_result(store):
     store.update(job.job_id, status="complete", completed_at=datetime.now(timezone.utc))
     store._reap_expired()
     assert store.get(job.job_id).status == "complete" and not store._terminal_recovery
+
+
+@pytest.mark.parametrize("failure", ["legacy-job", "keyed-job", "keyed-receipt"])
+def test_full_retention_failed_admission_preserves_original_history(store, monkeypatch, tmp_path, failure):
+    monkeypatch.setattr(settings, "max_retained_jobs", 1)
+    monkeypatch.setattr(settings, "output_dir", str(tmp_path / "artifacts"))
+    key = key_at(datetime.now(timezone.utc))
+    original, _, _ = create(store, key)
+    store.update(original.job_id, status="complete", completed_at=datetime.now(timezone.utc))
+    iid = f"{original.job_id}:1"
+    override = {"status": "active", "note": "Operator review", "resolved_at": None, "updated_at": None}
+    store._incident_overrides[iid] = override
+    with store._db:
+        store._db.execute("INSERT INTO overrides VALUES (?, ?)", (iid, json.dumps(override)))
+    artifact = tmp_path / "artifacts" / original.job_id / "frame.jpg"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"original")
+    table = "submission_receipts" if failure == "keyed-receipt" else "jobs"
+    store._db.execute(
+        f"CREATE TRIGGER reject_replacement BEFORE INSERT ON {table} "
+        "BEGIN SELECT RAISE(ABORT, 'replacement failed'); END"
+    )
+    store._db.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="replacement failed"):
+        if failure == "legacy-job":
+            store.create(SOURCE)
+        else:
+            create(store, key_at(datetime.now(timezone.utc)))
+    assert store.get(original.job_id) is not None
+    assert store._incident_overrides[iid] == override and artifact.read_bytes() == b"original"
+    assert store.find_submission(key)[0].job_id == original.job_id
+    assert store._db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    assert store._db.execute("SELECT count(*) FROM overrides").fetchone()[0] == 1
+    snapshot_path = str(tmp_path / "rollback-restart.sqlite3")
+    snapshot = sqlite3.connect(snapshot_path)
+    store._db.backup(snapshot)
+    snapshot.close()
+    restarted = JobStore(database_path=snapshot_path, start_reaper=False)
+    assert restarted.get(original.job_id).status == "complete"
+    assert restarted._incident_overrides[iid] == override
+    assert restarted.find_submission(key)[0].job_id == original.job_id
+    restarted._db.close()
+    store._db.execute("DROP TRIGGER reject_replacement")
+    store._db.commit()
+    replacement = (store.create(SOURCE) if failure == "legacy-job"
+                   else create(store, key_at(datetime.now(timezone.utc)))[0])
+    assert store.get(replacement.job_id) is not None and store.get(original.job_id) is None
+    assert iid not in store._incident_overrides and not artifact.exists()
+    assert store._db.execute("SELECT count(*) FROM overrides").fetchone()[0] == 0
+    with pytest.raises(SubmissionIdentityError) as error:
+        store.find_submission(key)
+    assert error.value.code == "idempotency_result_expired"
+    successful_path = str(tmp_path / "successful-eviction.sqlite3")
+    snapshot = sqlite3.connect(successful_path)
+    store._db.backup(snapshot)
+    snapshot.close()
+    restarted = JobStore(database_path=successful_path, start_reaper=False)
+    assert restarted.get(original.job_id) is None
+    assert iid not in restarted._incident_overrides
+    assert restarted.get(replacement.job_id).status == "failed"
+    with pytest.raises(SubmissionIdentityError) as error:
+        restarted.find_submission(key)
+    assert error.value.code == "idempotency_result_expired"
+    restarted._db.close()
