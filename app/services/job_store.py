@@ -630,7 +630,10 @@ class JobStore:
     def _reap_loop(self) -> None:
         while True:
             time.sleep(60)
-            self._reap_expired()
+            try:
+                self._reap_expired()
+            except sqlite3.OperationalError:
+                logger.exception("SQLite periodic cleanup failed; retrying at the next 60-second cycle.")
 
     def _reap_expired(self) -> None:
         now = _utcnow().timestamp()

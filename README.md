@@ -312,6 +312,11 @@ result eviction returns 410 instead of creating duplicate work. At
 are never evicted to admit them. Expired receipts are purged at startup,
 on new keyed admission, and by the existing minute reaper. Even after deletion,
 the time-stamped expired identity is rejected, not reused.
+Periodic cleanup logs SQLite operational failures explicitly and retries at the
+next normal 60-second cycle; it does not silently stop after a transient storage
+failure or retry in a tight loop. Failed cleanup can delay job/artifact and
+receipt removal until storage recovers; it never discards unexpired receipts
+to admit new work. Request-time storage failures remain visible API errors.
 Receipt cleanup atomically persists a nondecreasing server-time watermark with
 deletion. Subsequent identity validation uses the later of wall time and that
 watermark, including after restart: clock rollback cannot revive a key already

@@ -341,3 +341,64 @@ def test_unreserved_expiry_observation_fences_rollback_before_cleanup_and_restar
     assert error.value.code == "idempotency_key_expired"
     assert restarted._submission_clock == observation and not restarted.all_jobs()
     restarted._db.close()
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_actual_reaper_loop_retries_transient_sqlite_failure_on_next_cycle(store, monkeypatch, tmp_path, caplog, keyed):
+    import logging
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    monkeypatch.setattr("app.services.job_store._utcnow", lambda: now)
+    monkeypatch.setattr(settings, "output_dir", str(tmp_path / "artifacts"))
+    job = create(store, key_at(now))[0] if keyed else store.create(SOURCE)
+    store.update(job.job_id, status="complete", completed_at=now)
+    artifacts = tmp_path / "artifacts" / job.job_id
+    artifacts.mkdir(parents=True)
+    (artifacts / "frame.jpg").write_bytes(b"test")
+    previous_clock = store._submission_clock
+    now += timedelta(days=2)
+    database = store._db.execute("PRAGMA database_list").fetchone()[2]
+    store._db.execute("PRAGMA busy_timeout=0")
+    blocker = sqlite3.connect(database)
+    blocker.execute("BEGIN IMMEDIATE")
+    waits = []
+
+    class StopTestLoop(Exception):
+        pass
+
+    def scheduled_wait(seconds):
+        waits.append(seconds)
+        assert seconds == 60, "Retry must wait for the next scheduled cycle"
+        if len(waits) == 2:
+            assert store.get(job.job_id) is not None and artifacts.exists()
+            assert store._submission_clock == previous_clock
+            assert len(store._submission_receipts) == int(keyed)
+            assert store._db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+            assert store._db.execute("SELECT count(*) FROM submission_receipts").fetchone()[0] == int(keyed)
+            assert any("SQLite" in record.message and record.exc_info for record in caplog.records)
+            blocker.rollback()
+        elif len(waits) == 3:
+            assert not store.all_jobs() and not artifacts.exists()
+            assert not store._submission_receipts and store._submission_clock == now
+            assert store._db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+            assert store._db.execute("SELECT count(*) FROM submission_receipts").fetchone()[0] == 0
+            raise StopTestLoop()
+
+    monkeypatch.setattr("app.services.job_store.time.sleep", scheduled_wait)
+    try:
+        with caplog.at_level(logging.ERROR, logger="app.services.job_store"):
+            with pytest.raises(StopTestLoop):
+                store._reap_loop()
+        assert waits == [60, 60, 60]
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_reaper_does_not_hide_sqlite_programming_errors(store, monkeypatch):
+    monkeypatch.setattr("app.services.job_store.time.sleep", lambda seconds: None)
+    def fail():
+        raise sqlite3.ProgrammingError("Invalid connection usage")
+    monkeypatch.setattr(store, "_reap_expired", fail)
+    with pytest.raises(sqlite3.ProgrammingError, match="Invalid connection usage"):
+        store._reap_loop()
