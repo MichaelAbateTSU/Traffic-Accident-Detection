@@ -264,7 +264,7 @@ the original job on replay.
 | **410** | `idempotency_key_expired` or `idempotency_result_expired`: identity is too old, or original result was removed. **Never** schedules work. Show that reconciliation is unavailable; do not automatically replace the key. A deliberately initiated new run requires a new identity. |
 | **422** | Invalid request/header, missing/duplicate headers, malformed identity, or `idempotency_key_in_future` (more than 60 seconds ahead of the effective server clock). New identities require a reasonably synchronized clock. Correct the input; do not replace a previously sent identity just to bypass an uncertainty. |
 | **503** | No model/queue, job/receipt capacity exhausted, or `idempotency_unavailable` (no durable store). Before reservation these create no receipt; retry **the same identity** with backoff. Capacity rejections include `Retry-After: 10`. |
-| **503** with `inference_admission_failed` | Reservation persisted but queue admission failed. `detail` includes original `job_id` and `idempotency_expires_at`; original job becomes `failed`. Same-key POST reconciles that failed job with 200 and never schedules another. |
+| **503** with `inference_admission_failed` | Reservation persisted but queue admission failed. `detail` includes original `job_id` and `idempotency_expires_at`; original job becomes `failed`. If the failure write is blocked, the message explicitly says it is awaiting storage recovery, and polling/replay retains the last durably recorded nonterminal state until recovery. Same-key POST never schedules another. |
 | **401 / 403** | Authentication or current source approval denied; no scheduling or reconciliation data. |
 | **404** on versioned POST | Endpoint unavailable on a legacy/downgraded/misconfigured backend. Do not fall back to the old endpoint, replace the identity or treat this as proof that a previous submission was not accepted. |
 | **500 / network timeout** | Acceptance is uncertain. Keep the original identity and request and retry them; never fall back to a keyless POST or automatically generate a replacement identity. |
@@ -338,6 +338,26 @@ before; same-key replay identifies that terminal original job. A crash between
 commit and queue submission also yields that original failed job on restart.
 There is no automatic restart/requeue and no claim of exactly-once inference
 completion: work can fail or have partial outputs before a crash.
+
+If queue rejection or a stopped worker's terminal-state write encounters a
+SQLite operational failure, the store keeps one in-process recovery intent per
+affected retained job. The existing reaper retries those writes at its normal
+60-second cadence, logging each failure with the job ID and traceback; it never
+resubmits inference. The registry is bounded by retained nonterminal jobs, and
+attempts use SQLite's finite connection timeout rather than an indefinite
+event-loop retry. No replacement thread is spawned per failed job. Persistent
+storage faults remain visible in logs and may hold admission capacity until
+recovery. Polling/replay reports the last persisted `pending`/`running` state,
+not a falsely durable `failed` state, until the write commits. Admission failure
+responses explicitly describe this wait. Recovery is only requested at known
+queue/worker failure boundaries, never inferred from job age; a cancelled
+async future does not imply its already-running thread has stopped.
+Completed results are not overwritten by deferred failure intents.
+On process restart, volatile intents are lost but the existing startup policy
+durably fails unfinished original jobs and retains their submission receipts;
+it does not resume work. The original detailed failure reason may then be
+replaced by the restart error. These recovery guarantees still require writable,
+intact storage; a permanent storage failure cannot yield a durable terminal result.
 
 These guarantees do **not** span multiple processes/replicas, separate backend
 volumes, database loss/replacement, restoring an older backup that omits

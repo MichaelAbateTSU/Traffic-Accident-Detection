@@ -402,3 +402,83 @@ def test_reaper_does_not_hide_sqlite_programming_errors(store, monkeypatch):
     monkeypatch.setattr(store, "_reap_expired", fail)
     with pytest.raises(sqlite3.ProgrammingError, match="Invalid connection usage"):
         store._reap_loop()
+
+
+def test_terminal_recovery_retries_on_normal_cycles_preserves_active_jobs_and_restart(store, monkeypatch, tmp_path, caplog):
+    job, _, _ = create(store, key_at(datetime.now(timezone.utc)))
+    active = store.create(SOURCE)
+    store.update(active.job_id, status="running")
+    path = store._db.execute("PRAGMA database_list").fetchone()[2]
+    store._db.execute("PRAGMA busy_timeout=0")
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+    assert store.fail_job(job.job_id, "Admission rejected") is False
+    assert store.fail_job(job.job_id, "Secondary callback error") is False
+    assert len(store._terminal_recovery) == 1
+    waits = []
+    class StopLoop(Exception):
+        pass
+    def scheduled_wait(seconds):
+        assert seconds == 60
+        waits.append(seconds)
+        if len(waits) == 2:
+            assert store.get(job.job_id).status == "pending"
+            assert store.get(active.job_id).status == "running"
+            assert len(store._terminal_recovery) == 1
+            blocker.rollback()
+        elif len(waits) == 3:
+            assert store.get(job.job_id).status == "failed"
+            assert store.get(job.job_id).error == "Admission rejected"
+            assert store.get(active.job_id).status == "running"
+            assert not store._terminal_recovery
+            raise StopLoop()
+    monkeypatch.setattr("app.services.job_store.time.sleep", scheduled_wait)
+    try:
+        with pytest.raises(StopLoop):
+            store._reap_loop()
+        assert waits == [60, 60, 60]
+        assert any("terminal recovery pending" in record.message and record.exc_info
+                   for record in caplog.records)
+    finally:
+        blocker.rollback()
+        blocker.close()
+    snapshot_path = str(tmp_path / "terminal-restart.sqlite3")
+    snapshot = sqlite3.connect(snapshot_path)
+    store._db.backup(snapshot)
+    snapshot.close()
+    restarted = JobStore(database_path=snapshot_path, start_reaper=False)
+    assert restarted.get(job.job_id).status == "failed"
+    assert restarted.get(job.job_id).error == "Admission rejected"
+    assert not restarted._terminal_recovery
+    restarted._db.close()
+
+
+def test_pending_terminal_recovery_after_crash_uses_existing_restart_policy(store, tmp_path):
+    key = key_at(datetime.now(timezone.utc))
+    job, _, _ = create(store, key)
+    path = store._db.execute("PRAGMA database_list").fetchone()[2]
+    store._db.execute("PRAGMA busy_timeout=0")
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert store.fail_job(job.job_id, "Unable to schedule") is False
+        snapshot_path = str(tmp_path / "pending-recovery.sqlite3")
+        snapshot = sqlite3.connect(snapshot_path)
+        store._db.backup(snapshot)
+        snapshot.close()
+    finally:
+        blocker.rollback()
+        blocker.close()
+    restarted = JobStore(database_path=snapshot_path, start_reaper=False)
+    original, replayed, _ = create(restarted, key)
+    assert replayed and original.job_id == job.job_id and original.status == "failed"
+    assert "restarted" in original.error and not restarted._terminal_recovery
+    restarted._db.close()
+
+
+def test_terminal_recovery_does_not_overwrite_already_completed_result(store):
+    job = store.create(SOURCE)
+    store._terminal_recovery[job.job_id] = ("Deferred error", datetime.now(timezone.utc))
+    store.update(job.job_id, status="complete", completed_at=datetime.now(timezone.utc))
+    store._reap_expired()
+    assert store.get(job.job_id).status == "complete" and not store._terminal_recovery

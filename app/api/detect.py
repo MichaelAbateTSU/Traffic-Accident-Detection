@@ -17,7 +17,7 @@ POST /detection-submissions/v1
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
@@ -220,11 +220,9 @@ async def _submit_detection(
         )
     except RuntimeError:
         logger.exception("Could not schedule detection job %s", job.job_id)
-        job_store.update(
-            job.job_id, status="failed", completed_at=datetime.now(timezone.utc),
-            error="The inference worker is unavailable.",
-        )
-        detail = "The inference worker is unavailable."
+        terminal_persisted = job_store.fail_job(job.job_id, "The inference worker is unavailable.")
+        detail = ("The inference worker is unavailable." if terminal_persisted else
+                  "The inference worker is unavailable; recording its failure is awaiting storage recovery.")
         if idempotency_key is not None:
             assert expires_at is not None
             raise HTTPException(status_code=503, detail={

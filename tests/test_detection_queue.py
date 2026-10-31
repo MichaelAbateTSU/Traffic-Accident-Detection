@@ -707,3 +707,128 @@ def test_expiry_fence_write_failure_is_visible_not_a_definitive_410(queued_clien
     assert not store.all_jobs() and not store._submission_receipts
     store._db.execute("DROP TRIGGER reject_expiry_fence")
     store._db.commit()
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_admission_failure_locked_terminal_write_recovers_without_rescheduling(queued_client, monkeypatch, keyed):
+    client, store, _, _, observed = queued_client
+    store._db.execute("PRAGMA busy_timeout=0")
+    path = store._db.execute("PRAGMA database_list").fetchone()[2]
+    blocker = sqlite3.connect(path, check_same_thread=False)
+    def reject(*args):
+        blocker.execute("BEGIN IMMEDIATE")
+        raise RuntimeError("Admission rejected after reservation")
+    schedule = Mock(side_effect=reject)
+    monkeypatch.setattr(client.app.state.detection_queue, "submit", schedule)
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    headers = {"Idempotency-Key": submission_key()} if keyed else {}
+    endpoint = "/detection-submissions/v1" if keyed else "/detect-accident"
+    try:
+        response = client.post(endpoint, json={"stream_url": SOURCES[0]}, headers=headers)
+        assert response.status_code == 503
+        job = store.all_jobs()[0]
+        assert job.status == "pending"
+        assert job.job_id in store._terminal_recovery
+        if keyed:
+            assert "awaiting storage recovery" in response.json()["detail"]["message"]
+            for reply in (
+                client.get("/detection-submissions/v1", headers=headers),
+                client.post(endpoint, json={"stream_url": SOURCES[0]}, headers=headers),
+            ):
+                assert reply.status_code == 200 and reply.json()["job_id"] == job.job_id
+                assert reply.json()["status"] == "pending"
+        blocker.rollback()
+        store._reap_expired()
+        assert store.get(job.job_id).status == "failed"
+        assert not store._terminal_recovery
+        if keyed:
+            reply = client.get("/detection-submissions/v1", headers=headers)
+            assert reply.json()["status"] == "failed" and reply.json()["job_id"] == job.job_id
+        assert not observed["order"] and schedule.call_count == 1
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_actual_worker_failure_under_lock_recovers_without_running_again(queued_client, monkeypatch, caplog, keyed):
+    client, store, _, _, _ = queued_client
+    queue = client.app.state.detection_queue
+    store._db.execute("PRAGMA busy_timeout=0")
+    path = store._db.execute("PRAGMA database_list").fetchone()[2]
+    blocker = sqlite3.connect(path, check_same_thread=False)
+    locked = threading.Event()
+    failed = threading.Event()
+    executions = []
+    def worker(job_id, *args):
+        executions.append(job_id)
+        blocker.execute("BEGIN IMMEDIATE")
+        locked.set()
+        failed.set()
+        raise RuntimeError("Worker failed under storage lock")
+    monkeypatch.setattr(queue, "_worker", worker)
+    headers = {"Idempotency-Key": submission_key()} if keyed else {}
+    endpoint = "/detection-submissions/v1" if keyed else "/detect-accident"
+    try:
+        response = client.post(endpoint, json={"stream_url": SOURCES[0]}, headers=headers)
+        assert response.status_code == 202 and locked.wait(2) and failed.wait(2)
+        jid = response.json()["job_id"]
+        wait_for(lambda: jid in store._terminal_recovery and jid not in queue._futures)
+        assert store.get(jid).status == "running"
+        for _ in range(2):
+            with pytest.raises(sqlite3.OperationalError):
+                store._reap_expired()  # Watermark is locked too; recovery must survive.
+        assert any("terminal recovery pending" in record.message and record.exc_info
+                   for record in caplog.records)
+        durable = sqlite3.connect(path)
+        payload = durable.execute("SELECT payload FROM jobs WHERE id = ?", (jid,)).fetchone()[0]
+        durable.close()
+        assert '"status":"running"' in payload
+        if keyed:
+            for reply in (
+                client.get("/detection-submissions/v1", headers=headers),
+                client.post(endpoint, json={"stream_url": SOURCES[0]}, headers=headers),
+            ):
+                assert reply.status_code == 200 and reply.json()["job_id"] == jid
+                assert reply.json()["status"] == "running"
+        blocker.rollback()
+        store._reap_expired()
+        assert store.get(jid).status == "failed"
+        assert "Worker failed under storage lock" in store.get(jid).error
+        assert not store._terminal_recovery and executions == [jid]
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_cancelled_active_future_does_not_mark_live_worker_failed(queued_client):
+    client, store, started, release, observed = queued_client
+    jid = submit(client, SOURCES[0])
+    assert started.wait(2)
+    client.portal.call(client.app.state.detection_queue._futures[jid].cancel)
+    wait_for(lambda: jid not in client.app.state.detection_queue._futures)
+    assert store.get(jid).status == "running" and jid not in store._terminal_recovery
+    release.set()
+    wait_for(lambda: store.get(jid).status == "complete")
+    assert observed["order"] == [jid]
+
+
+def test_deferred_cancelled_pending_failure_cannot_start_inference(queued_client, monkeypatch):
+    client, store, _, _, observed = queued_client
+    job = store.create(SOURCES[0])
+    store._db.execute("PRAGMA busy_timeout=0")
+    blocker = sqlite3.connect(store._db.execute("PRAGMA database_list").fetchone()[2])
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert store.fail_job(job.job_id, "Queued task cancelled") is False
+        worker = Mock()
+        monkeypatch.setattr(client.app.state.detection_queue, "_worker", worker)
+        client.app.state.detection_queue._run(job.job_id, SOURCES[0], 5, object(), False)
+        worker.assert_not_called()
+        assert store.get(job.job_id).status == "pending" and not observed["order"]
+        blocker.rollback()
+        store._reap_expired()
+        assert store.get(job.job_id).status == "failed"
+    finally:
+        blocker.rollback()
+        blocker.close()

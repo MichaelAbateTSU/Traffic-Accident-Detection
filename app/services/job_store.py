@@ -143,6 +143,7 @@ class JobStore:
         self._jobs: dict[str, DetectionResult] = {}
         self._submission_receipts: dict[str, tuple[str, str, datetime]] = {}
         self._submission_clock = datetime.min.replace(tzinfo=timezone.utc)
+        self._terminal_recovery: dict[str, tuple[str, datetime]] = {}
         # Operator overrides keyed by incident_id ("<job_id>:<frame_idx>").
         self._incident_overrides: dict[str, dict] = {}
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.job_ttl_seconds
@@ -388,6 +389,42 @@ class JobStore:
     def count_running(self) -> int:
         with self._lock:
             return sum(1 for j in self._jobs.values() if j.status == "running")
+
+    def fail_job(self, job_id: str, error: str) -> bool:
+        """Record a known stopped/rejected job; never infer failure from age."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in ("complete", "failed"):
+                self._terminal_recovery.pop(job_id, None)
+                return True
+            # At most one intent per retained nonterminal job, bounded by admission.
+            self._terminal_recovery.setdefault(job_id, (error, _utcnow()))
+            return self._recover_terminal_locked(job_id)
+
+    def has_terminal_recovery(self, job_id: str) -> bool:
+        with self._lock:
+            return job_id in self._terminal_recovery
+
+    def _recover_terminal_locked(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if job is None or job.status in ("complete", "failed"):
+            self._terminal_recovery.pop(job_id, None)
+            return True
+        error, completed_at = self._terminal_recovery[job_id]
+        updated = job.model_copy(update={
+            "status": "failed", "completed_at": completed_at, "error": error,
+        })
+        try:
+            self._persist_job(updated)
+        except sqlite3.OperationalError:
+            logger.exception(
+                "SQLite terminal recovery pending for job %s; retrying at the next 60-second cycle.",
+                job_id,
+            )
+            return False
+        self._jobs[job_id] = updated
+        del self._terminal_recovery[job_id]
+        return True
 
     def all_jobs(self) -> list[DetectionResult]:
         with self._lock:
@@ -638,6 +675,8 @@ class JobStore:
     def _reap_expired(self) -> None:
         now = _utcnow().timestamp()
         with self._lock:
+            for job_id in list(self._terminal_recovery):
+                self._recover_terminal_locked(job_id)
             self._reap_receipts_locked(datetime.fromtimestamp(now, tz=timezone.utc))
             expired = [
                 jid

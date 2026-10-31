@@ -6,7 +6,6 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from typing import Callable
 
 from app.services.job_store import JobStore
@@ -37,9 +36,7 @@ class DetectionQueue:
         job = self._store.get(job_id)
         if job is not None and job.status in ("pending", "running"):
             logger.error("Inference queue failed job %s: %s", job_id, error)
-            self._store.update(
-                job_id, status="failed", completed_at=datetime.now(timezone.utc), error=error,
-            )
+            self._store.fail_job(job_id, error)
 
     def _run(self, job_id: str, *args) -> None:
         try:
@@ -48,7 +45,7 @@ class DetectionQueue:
                     self._fail(job_id, "The service shut down before this queued job started.")
                     return
                 job = self._store.get(job_id)
-                if job is None or job.status != "pending":
+                if job is None or job.status != "pending" or self._store.has_terminal_recovery(job_id):
                     logger.warning("Skipping unavailable or terminal queued job %s", job_id)
                     return
                 self._store.update(job_id, status="running")
@@ -62,7 +59,12 @@ class DetectionQueue:
         with self._lock:
             self._futures.pop(job_id, None)
         if future.cancelled():
-            self._fail(job_id, "The queued inference task was cancelled before completion.")
+            with self._lock:
+                job = self._store.get(job_id)
+                if job is not None and job.status == "pending":
+                    self._fail(job_id, "The queued inference task was cancelled before completion.")
+                elif job is not None and job.status == "running":
+                    logger.warning("Cancelled future for active job %s; its worker still owns the outcome.", job_id)
         else:
             error = future.exception()
             if error is not None:
