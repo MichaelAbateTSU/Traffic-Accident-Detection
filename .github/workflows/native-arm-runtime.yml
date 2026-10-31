@@ -83,18 +83,14 @@ jobs:
             --mount "type=bind,source=$PWD,target=/source,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/carla-media,target=/media,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/carla-results,target=/results" \
-            carla-experiment python /source/deploy/carla_experiment.py
+            carla-experiment python /source/deploy/sideswipe_candidate_diagnostic.py
       - name: Upload only derived numerical provenance
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: carla-numerical-results
+          name: sideswipe-candidate-diagnostic
           path: |
             ${{ runner.temp }}/carla-results/structure.json
-            ${{ runner.temp }}/carla-results/detection-record.json
-            ${{ runner.temp }}/carla-results/legacy/summary.json
-            ${{ runner.temp }}/carla-results/legacy/carla_sideswipe/frames.jsonl
-            ${{ runner.temp }}/carla-results/constant-fps/summary.json
-            ${{ runner.temp }}/carla-results/constant-fps/carla_sideswipe/frames.jsonl
+            ${{ runner.temp }}/carla-results/candidate-diagnostic.json
           if-no-files-found: error
           retention-days: 7
