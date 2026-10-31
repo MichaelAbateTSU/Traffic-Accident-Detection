@@ -1009,6 +1009,99 @@ classification/probability calibration requires separately trained/calibrated
 models and group-separated evaluation data. No labels or accuracy are fabricated
 when external dataset access is unavailable.
 
+### Frame-rate reproduction and blocked correction
+
+**Source FPS is not currently used by `AccidentScorer`.** The production worker
+reads and discards capture FPS; the continuous CLI displays it; the evaluator
+validates it and uses it for output timestamps/metrics. All three create
+`AccidentScorer()` and increment a decoded-frame counter. The snapshot CLI
+also uses consecutive indices: sleeping between reads does not establish that
+the next decoded frame is one source-second later. Image-folder CLI input
+assumes 10 FPS without timing evidence.
+
+Reproduce the legacy behavior without downloading models:
+
+```bash
+python -m pytest -q tests/test_scorer_timing.py tests/test_accident_scorer.py tests/test_accident_evaluation.py
+python -m pytest -q -s tests/test_scorer_timing.py::test_report_measured_trajectories
+```
+
+The timing tests feed deterministic positions through the real scorer, plus
+mocked inference/capture/tracking through production, CLI, snapshot and
+evaluation entry points. They are **characterization tests of existing
+behavior**, not acceptance criteria for a future FPS correction. All use fixed
+40-by-40-pixel boxes and the same four-second trajectories sampled at 5, 10,
+25 and 50 FPS; there is no threshold tuning. Selected results:
+
+| Timed trajectory | FPS | Peak score | First stop signal (seconds) | Peak deceleration signal |
+|---|---|---|---|---|
+| Steady 100 px/s | 10 | 0.0000 | None | 0.0000 |
+| Steady 100 px/s | 25 | 0.1250 | 0.16 | 0.0000 |
+| 1000 px/s, braking continuously from second 1 to 2 at -1000 px/s squared | 10 | 0.1935 | 2.70 | 1.0000 |
+| Same continuous braking | 25 | 0.1250 | 2.12 | 0.0000 |
+| Two tracks approach at 100 px/s each, overlap and stop at second 0.95 | 10 | 0.4180 | 1.50 | 0.0000 |
+| Same overlap trajectory | 25 | 0.5946 | 0.16 (before overlap) | 0.0000 |
+
+No trajectory in this reproduction crosses the 0.65 alarm threshold.
+The steady-motion difference is a unit mismatch, not loss of an impact
+between samples: 100 px/s becomes 10 px/frame at 10 FPS but 4 px/frame at
+25 FPS, below the unchanged 5 px/frame stop threshold. Continuous braking
+also has FPS-dependent pixel/frame-squared units. These measurements do not
+identify the cause of any particular real clip's missed impact or establish
+calibrated accuracy.
+
+Independent temporal checks expose why converting speeds alone is incomplete:
+
+| Legacy rule | At 10 FPS | At 25 FPS |
+|---|---|---|
+| Five stationary observations, first observed at time zero | First signal at 0.40 s | First signal at 0.16 s |
+| History of 50 observations (oldest-to-newest span) | 4.90 s | 1.96 s |
+| Lost-track grace of 10 frame indices (inclusive boundary) | 1.00 s | 0.40 s |
+| Collision-event memory of 15 frame indices (inclusive boundary) | 1.50 s | 0.60 s |
+| Score and velocity EMAs | One update per observation | One update per observation |
+
+The eight-observation braking window, six-observation convergence window and
+five-observation direction-change window likewise have sample-dependent
+durations. Reversal tests preserve the direction-independent scalar braking
+correction. Gap tests show that displacement uses elapsed source indices,
+but the EMAs still tick once per observation: every-other-frame sampling at
+10 FPS doubles the 50-observation history span to 9.80 seconds. A reappearing
+track can retain five stationary observations across a long gap; ingesting
+it precedes stale-track purging. Current convergence compares history entries
+by position in the deque, not by shared source timestamps.
+
+Some differences are expected even with correct timing. For these boxes,
+geometric overlap starts at second 0.83636; first observed overlap is 0.90 at
+10 FPS and 0.84 at 25 FPS, both within one sampling interval. A synthetic
+overlap entirely between samples is unobserved. Exact score equality across
+rates is not a valid general acceptance requirement, especially with real
+YOLO/DeepSORT detections, occlusions and track confirmation/age rules that
+also depend on observations.
+
+**No runtime FPS correction is enabled by this investigation.** A focused,
+backward-compatible automatic correction has not been established. Before
+implementing one, specify a per-source timing contract: validated
+constant-rate FPS or reliable source timestamps, whether indices represent
+decoded or skipped source frames, and an explicit fail/opt-in legacy policy
+for unknown timing. Production currently accepts unknown, zero, negative,
+NaN and infinite reported FPS because it ignores the value. The CLI silently
+falls back for unknown/nonpositive/NaN FPS and even accepts infinity; neither
+is a verified timebase. Evaluation rejects nonfinite/invalid manifest FPS and
+invalid or mismatched video FPS, but frame-index/FPS timestamps are still not
+variable-rate PTS.
+
+A prospective correction should retain the unchanged 10-FPS thresholds in
+reference-frame units, normalize elapsed time and kinematics using the
+declared source rate, and derive EMA updates from elapsed reference time
+rather than observation count. Time-window boundary, missing-observation,
+convergence pairing and direction-change semantics need explicit decisions
+and regression coverage, with legacy 10-FPS outputs preserved where intended.
+Blindly changing global `ASSUMED_FPS`, scaling thresholds alone, interpolating
+unobserved collisions, or claiming that capture FPS proves timing reliability
+does not satisfy that contract. Production resizing/viewpoint dependence
+remains a separate limitation. Existing runtime behavior is preserved; only
+tests, documentation and misleading configuration comments are changed.
+
 ---
 
 ## Configuration
@@ -1029,7 +1122,7 @@ All detection parameters live in `config.py`. Edit once; every module picks up t
 | Parameter | Default | Description |
 |---|---|---|
 | `DEEPSORT_MAX_AGE` | `30` | Frames before a lost track is deleted |
-| `HISTORY_WINDOW_SECONDS` | `5` | Rolling history length per track |
+| `HISTORY_WINDOW_SECONDS` | `5` | Derives a fixed 50-observation scorer history at the legacy 10-FPS reference rate, not five measured source seconds |
 
 ### Accident scoring
 
