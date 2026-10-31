@@ -929,6 +929,31 @@ An alarm only before the annotated onset is **not** a post-onset collision
 detection. `clip_confusion`/`clip_recall` describe any alarm anywhere in a clip;
 `post_onset_alarm` and `post_onset_positive_clip_hit_rate` describe the separate
 onset-based check. Neither is calibrated probability or population accuracy.
+Both `post_onset_alarm` and the legacy `post_onset_positive_clip_hit_rate` count
+any active observation at/after onset, including an alarm that began earlier
+and remained active. They can be positive without any newly observed transition
+after onset and must not be interpreted as onset-triggered collision detection.
+The compatibility field `first_alarm_after_annotated_onset_delay_seconds` measures
+the first **active sampled frame** at/after onset, not a new alarm beginning.
+An alarm already active before impact can therefore produce zero delay.
+Complementary per-clip fields report `observed_pre_onset_alarm_active` and
+`last_observed_pre_onset_alarm_active` (`null` without a pre-onset observation),
+`first_observation_alarm_active`, and `alarm_state_before_first_observation`
+(always unknown). `observed_false_to_true_alarm_transitions` only records adjacent
+observed inactive-to-active pairs; an initially active clip does not invent a
+transition. Each pair brackets a possible change in `(previous timestamp,
+active timestamp]`, with source frame indices including `source_start_frame`.
+Its `onset_relation` distinguishes intervals before onset, entirely at/after
+onset, and intervals crossing or ending exactly at onset (whose actual change
+may precede onset). `first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds`
+uses the first such pair's active observation at/after onset, **not** an exact
+transition delay. It is `null` when onset is missing or no later pair is observed,
+including an alarm spanning onset without reactivation. FPS-derived boundaries
+are sample approximations, not PTS; onset between samples cannot establish the
+change's side of impact. Clips starting at/after onset cannot establish pre-onset
+state. These prediction observations work with sparse/unknown labels, but do not
+establish collision detection or representative accuracy; no new aggregate rate
+is inferred from them.
 The API's existing `DetectionEvent.timestamp_sec` is **processing wall-clock
 elapsed time**, not media time; never compare it directly with a dataset onset.
 Offline `timestamp_seconds` is derived from decoded frame index and source FPS.
