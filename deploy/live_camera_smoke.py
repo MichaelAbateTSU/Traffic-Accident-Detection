@@ -22,6 +22,8 @@ COUNTERS = {
     "confirmed_track_observations": 0, "max_confirmed_tracks": 0, "scorer_calls": 0,
     "deep_sort_embedder_calls": 0, "embedded_crop_count": 0, "blocked_write_attempts": 0,
     "job_finished": False,
+    "tracker_initializations": 0, "blocked_write_categories": {},
+    "blocked_write_modules": {},
 }
 PROBE_STATE = {"stage": "initialization", "job_submitted": False}
 
@@ -54,6 +56,26 @@ def serve():
             }
             if os.path.abspath(os.fspath(path)) not in permitted:
                 COUNTERS["blocked_write_attempts"] += 1
+                normalized = os.path.abspath(os.fspath(path))
+                category = "other"
+                if normalized.startswith("/tmp/ultralytics/"):
+                    category = "ultralytics_settings"
+                elif normalized.startswith("/tmp/matplotlib/"):
+                    category = "matplotlib_cache"
+                elif normalized.startswith("/tmp/"):
+                    category = "temporary_file"
+                categories = COUNTERS["blocked_write_categories"]
+                categories[category] = categories.get(category, 0) + 1
+                frame = sys._getframe(1)
+                while frame:
+                    module = frame.f_globals.get("__name__", "")
+                    if module.split(".")[0] in {
+                        "torch", "torchvision", "tempfile", "matplotlib",
+                        "ultralytics", "deep_sort_realtime",
+                    }:
+                        modules = COUNTERS["blocked_write_modules"]
+                        modules[module] = modules.get(module, 0) + 1
+                    frame = frame.f_back
                 raise PermissionError("Non-metadata write forbidden in live smoke")
 
     sys.addaudithook(audit)
@@ -84,6 +106,7 @@ def serve():
     @functools.wraps(original_tracker_init)
     def measured_tracker_init(self, *args, **kwargs):
         original_tracker_init(self, *args, **kwargs)
+        COUNTERS["tracker_initializations"] += 1
         count_result(self._tracker.embedder, "predict",
                      "deep_sort_embedder_calls", "embedded_crop_count")
 
@@ -137,6 +160,7 @@ def probe():
         time.sleep(1)
 
     PROBE_STATE["stage"] = "unauthenticated_request_rejection"
+    PROBE_STATE["model_loaded"] = True
     assert request("/jobs", authenticated=False)[0] == 401
     PROBE_STATE["stage"] = "invalid_token_rejection"
     assert request("/jobs", invalid=True)[0] == 401
@@ -152,6 +176,7 @@ def probe():
     with socket.create_connection(("egress", 3128), timeout=3) as connection:
         connection.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
         assert connection.recv(1024).startswith(b"HTTP/1.1 403 ")
+    PROBE_STATE.update(authentication_checks_passed=True, egress_checks_passed=True)
     PROBE_STATE["stage"] = "fixed_source_job_submission"
     status, submitted = request("/detect-accident", {
         "stream_url": SOURCE, "max_frames": MAX_FRAMES, "save_frames": False,
@@ -168,6 +193,17 @@ def probe():
             raise RuntimeError("Bounded live job did not reach a terminal state")
         time.sleep(1)
     PROBE_STATE["stage"] = "terminal_job_evidence"
+    PROBE_STATE.update(job_status=job["status"], frames_processed=job["frames_processed"],
+                       published_frame_count=len(job["frames"]))
+    error = job.get("error") or ""
+    if "PermissionError" in error or "Read-only file system" in error:
+        PROBE_STATE["job_error_category"] = "filesystem_write_denied"
+    elif "Could not open approved stream via the egress proxy" in error:
+        PROBE_STATE["job_error_category"] = "approved_stream_open_failed"
+    elif "decodable video frames" in error:
+        PROBE_STATE["job_error_category"] = "no_decodable_frames"
+    elif error:
+        PROBE_STATE["job_error_category"] = "pipeline_failure_details_suppressed"
     # Worker publishes counters just after updating the terminal job.
     for _ in range(20):
         if METRICS.exists() and json.loads(METRICS.read_text())["job_finished"]:
