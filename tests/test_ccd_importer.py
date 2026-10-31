@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -28,8 +29,8 @@ def test_ccd_synthetic_row_maps_sequential_frames_not_untrimmed_start(tmp_path, 
     assert normal.labels == [None] * 50
     assert normal.clip_label == 0
     assert normal.group_id != crash.group_id
-    assert crash.source.endswith("/Crash-1500/000001.mp4")
-    assert normal.source.endswith("/Normal/000001.mp4")
+    assert Path(crash.source) == (tmp_path / "Crash-1500" / "000001.mp4").resolve()
+    assert Path(normal.source) == (tmp_path / "Normal" / "000001.mp4").resolve()
     assert result.annotation_sha256 == prepare_ccd._sha256(annotation)
     assert "000777" in crash.annotation_notes[1]
     missed = clip_metrics(crash.labels, [False] * 50, 10)
