@@ -186,16 +186,20 @@ class AccidentScorer:
             if rec._ema_vx is None:
                 vx, vy = 0.0, 0.0
             else:
-                raw_vx = cx - rec.history[-1].cx if rec.history else 0.0
-                raw_vy = cy - rec.history[-1].cy if rec.history else 0.0
+                dt = frame_idx - rec.history[-1].frame_idx
+                if dt <= 0:
+                    raise ValueError("Track frame indices must increase monotonically")
+                raw_vx = (cx - rec.history[-1].cx) / dt
+                raw_vy = (cy - rec.history[-1].cy) / dt
                 alpha_v = 0.4  # velocity EMA (faster than score EMA)
                 vx = alpha_v * raw_vx + (1.0 - alpha_v) * rec._ema_vx
                 vy = alpha_v * raw_vy + (1.0 - alpha_v) * rec._ema_vy
 
             # Acceleration
             if rec.history:
-                ax = vx - rec.history[-1].vx
-                ay = vy - rec.history[-1].vy
+                dt = frame_idx - rec.history[-1].frame_idx
+                ax = (vx - rec.history[-1].vx) / dt
+                ay = (vy - rec.history[-1].vy) / dt
             else:
                 ax, ay = 0.0, 0.0
 
@@ -269,7 +273,9 @@ class AccidentScorer:
 
     def _signal_abrupt_decel(self) -> float:
         """
-        Returns max normalised deceleration signal across all tracks.
+        Returns max normalised decrease in smoothed speed across all tracks.
+        Direction changes alone are not deceleration. Missing observations
+        contribute their actual elapsed frames, not a single-frame jump.
         """
         w = config.DECEL_WINDOW_FRAMES
         threshold = config.DECEL_THRESHOLD  # negative value
@@ -281,9 +287,10 @@ class AccidentScorer:
             recent = list(rec.history)[-w:]
             if len(recent) < 2:
                 continue
-            accels = [math.hypot(s.ax, s.ay) * (-1 if s.ax < 0 or s.ay < 0 else 1)
-                      for s in recent]
-            mean_accel = sum(accels) / len(accels)
+            elapsed = recent[-1].frame_idx - recent[0].frame_idx
+            if elapsed <= 0:
+                raise ValueError("Track frame indices must increase monotonically")
+            mean_accel = (recent[-1].speed - recent[0].speed) / elapsed
             if mean_accel < threshold:
                 # Normalise: threshold → 0.5, 3× threshold → 1.0
                 signal = min(1.0, (mean_accel - threshold) / (2 * threshold) + 0.5)
