@@ -155,11 +155,15 @@ downscaled **in production only**, which can affect pixel-based scoring.
 The evaluation layer owns the API frame-count contract.
 The 120-frame frontend default is **not** a guaranteed sub-300-second run:
 CPU contention, scene density, decoding and tracking can make it exceed that
-deadline. An isolated production-matched nano run (1280 downscale, two threads)
+deadline. An isolated nano run (1280 downscale, two threads)
 processed 120 labeled frames in **31.5 seconds on the evaluation host**, whereas
 a contended raw-resolution run took 319.1 seconds. These are different
 environments, not an accuracy-equivalent model comparison or a production VM
-benchmark. The deployment retains a configurable 300-second execution cap with
+benchmark. That isolated run used `INTER_AREA` resizing, while production uses
+OpenCV's default `INTER_LINEAR`; its scores and timing are not exact
+production-preprocessing comparisons. A corrected evaluation must use
+`INTER_LINEAR` with the same target dimensions and thread settings.
+The deployment retains a configurable 300-second execution cap with
 explicit terminal timeout failures, not complete partial results. Actual native
 ARM/VM timing remains unmeasured and must be checked before claiming throughput.
 
