@@ -24,6 +24,11 @@ router = APIRouter(prefix="/cameras", tags=["cameras"])
     "/status",
     response_model=list[FrontendCameraStatus],
     summary="List camera statuses (derived from jobs)",
+    description=(
+        "Not a camera registry or health check. One entry per distinct source ID among retained jobs "
+        "(video URLs included), using the latest job by created_at: pending/running -> online, "
+        "failed -> warning, otherwise offline. last_seen_at is a job timestamp, not a heartbeat."
+    ),
 )
 async def get_camera_status() -> list[FrontendCameraStatus]:
     jobs = job_store.all_jobs()

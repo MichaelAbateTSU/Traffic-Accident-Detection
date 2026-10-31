@@ -20,7 +20,7 @@ router = APIRouter(prefix="/stats", tags=["stats"])
     response_model=StatsOverviewResponse,
     summary="Get dashboard overview stats",
     response_description="Dashboard-friendly aggregate counters and service status.",
-    description="Counts retained alarm-active frame records, not distinct accidents. uptime_percent is a nonfailed-job fraction, not service uptime.",
+    description="Counts retained alarm-active frame records, not distinct accidents. uptime_percent is a nonfailed-job fraction, not service uptime. Camera counts derive from retained job source IDs, and detection_status from model state and job counts, not stream health.",
 )
 async def get_stats_overview(
     request: Request,

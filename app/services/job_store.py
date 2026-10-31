@@ -268,7 +268,8 @@ class JobStore:
         return counts
 
     def camera_counts(self) -> tuple[int, int]:
-        """Return (active_cameras, total_cameras) based on stream URLs."""
+        """Return (active_cameras, total_cameras): distinct source IDs among pending/running vs all
+        retained jobs (video URLs included). Not a configured-camera registry."""
         with self._lock:
             jobs = list(self._jobs.values())
         active = {
