@@ -56,3 +56,42 @@ jobs:
             --mount "type=bind,source=$PWD/deploy/verify_cpu_runtime.py,target=/app/verify_cpu_runtime.py,readonly" \
             traffic-detection-cpu:ci \
             python verify_cpu_runtime.py --expected-machine aarch64
+      - name: Fetch fixed noncommercial CARLA sources
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          mkdir -p "$RUNNER_TEMP/carla-media" "$RUNNER_TEMP/carla-results"
+          chmod 777 "$RUNNER_TEMP/carla-results"
+          curl --fail --location --max-time 120 --max-filesize 3000000 \
+            'https://www.kaggle.com/api/v1/datasets/download/picekl/accident?fileName=synthetic_videos%2Fvideos%2Fhead-on%2FTown03_head-on_clear_30.mp4' \
+            -o "$RUNNER_TEMP/carla-media/video.mp4"
+          curl --fail --location --max-time 120 --max-filesize 10000000 \
+            'https://www.kaggle.com/api/v1/datasets/download/picekl/accident/metadata-synthetic.csv' \
+            -o "$RUNNER_TEMP/carla-media/metadata.csv"
+          curl --fail --location --max-time 120 --max-filesize 3000000 \
+            'https://www.kaggle.com/api/v1/datasets/download/picekl/accident?fileName=synthetic_videos%2Fannotations%2FTown03_head-on_clear_30.json%2FTown03_head-on_clear_30.json' \
+            -o "$RUNNER_TEMP/carla-media/annotation.json"
+      - name: Verify fixed source offline
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          printf 'FROM traffic-detection-cpu:ci\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*\nUSER detector\n' > "$RUNNER_TEMP/experiment.Dockerfile"
+          docker build -f "$RUNNER_TEMP/experiment.Dockerfile" -t carla-experiment .
+          timeout 300 docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 4g --pids-limit 128 \
+            --tmpfs /tmp:size=256m,mode=1777 \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/source \
+            -e INFERENCE_THREADS=2 \
+            --mount "type=bind,source=$PWD,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/carla-media,target=/media,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/carla-results,target=/results" \
+            carla-experiment python /source/deploy/carla_experiment.py
+      - name: Upload only derived numerical provenance
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: carla-numerical-results
+          path: |
+            ${{ runner.temp }}/carla-results/structure.json
+            ${{ runner.temp }}/carla-results/evaluation/summary.json
+            ${{ runner.temp }}/carla-results/evaluation/carla_head_on/frames.jsonl
+          if-no-files-found: error
+          retention-days: 7
