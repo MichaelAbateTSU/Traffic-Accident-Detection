@@ -11,7 +11,9 @@ from pathlib import Path
 sys.path.insert(0, "/source")
 
 FILES = {
+    "video.mp4": "10b250213020e53a29a5ed66dfef636de5f731ad35e61c7165e918da3b79649b",
     "metadata.csv": "57d250eaf08f182f14f322af259bc5f683ec60d2d8d016e27a15bdcd23cf873b",
+    "annotation.json": "7fb8b7132b80006543a4a2e28b7c9a9fcc705403335730487658270065fe6257",
 }
 SELECTED_PATH = "synthetic_videos/videos/sideswipe/Town04_sideswipe_clear_40.mp4"
 
@@ -74,12 +76,8 @@ def main(verify_only=False):
     for name in ["video.mp4", "metadata.csv", "annotation.json"]:
         path = Path("/media") / name
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if name in FILES and actual != FILES[name]:
+        if actual != FILES[name]:
             raise ValueError(f"Checksum mismatch: {name}")
-        if name not in FILES:
-            repeated = Path("/media") / ("repeat-" + name)
-            if hashlib.sha256(repeated.read_bytes()).hexdigest() != actual:
-                raise ValueError(f"Repeated fixed public source checksum differs: {name}")
         checks[name] = {"sha256": actual, "bytes": path.stat().st_size}
     value = json.loads(Path("/media/annotation.json").read_text())
     with Path("/media/metadata.csv").open() as handle:

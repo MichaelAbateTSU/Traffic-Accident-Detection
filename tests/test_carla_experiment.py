@@ -1,6 +1,6 @@
 import pytest
 
-from deploy.carla_experiment import aligned_labels, verify_constant_timing
+from deploy.carla_experiment import SELECTED_PATH, aligned_labels, select_metadata, verify_constant_timing
 
 
 def fixture():
@@ -45,3 +45,14 @@ def test_full_constant_timing_rejects_drops_and_bad_pts():
     timestamps[100] += 0.05
     with pytest.raises(ValueError):
         verify_constant_timing(timestamps)
+
+
+def test_frozen_selection_is_lexicographic_and_unique():
+    row = dict(rgb_path=SELECTED_PATH, type="sideswipe", weather="clear",
+               accident_frame="127", no_frames="232")
+    later = {**row, "rgb_path": "synthetic_videos/videos/sideswipe/Z.mp4"}
+    assert select_metadata([later, row]) == row
+    with pytest.raises(ValueError):
+        select_metadata([row, row])
+    with pytest.raises(ValueError):
+        select_metadata([{**row, "rgb_path": "A.mp4"}, row])

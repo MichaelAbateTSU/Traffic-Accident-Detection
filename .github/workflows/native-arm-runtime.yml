@@ -70,12 +70,6 @@ jobs:
           curl --fail --location --max-time 120 --max-filesize 3000000 \
             'https://www.kaggle.com/api/v1/datasets/download/picekl/accident?fileName=synthetic_videos%2Fannotations%2FTown04_sideswipe_clear_40.json%2FTown04_sideswipe_clear_40.json' \
             -o "$RUNNER_TEMP/carla-media/annotation.json"
-          curl --fail --location --max-time 120 --max-filesize 3000000 \
-            'https://www.kaggle.com/api/v1/datasets/download/picekl/accident?fileName=synthetic_videos%2Fvideos%2Fsideswipe%2FTown04_sideswipe_clear_40.mp4' \
-            -o "$RUNNER_TEMP/carla-media/repeat-video.mp4"
-          curl --fail --location --max-time 120 --max-filesize 3000000 \
-            'https://www.kaggle.com/api/v1/datasets/download/picekl/accident?fileName=synthetic_videos%2Fannotations%2FTown04_sideswipe_clear_40.json%2FTown04_sideswipe_clear_40.json' \
-            -o "$RUNNER_TEMP/carla-media/repeat-annotation.json"
       - name: Verify fixed source offline
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -89,7 +83,7 @@ jobs:
             --mount "type=bind,source=$PWD,target=/source,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/carla-media,target=/media,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/carla-results,target=/results" \
-            carla-experiment python /source/deploy/carla_experiment.py --verify-only
+            carla-experiment python /source/deploy/carla_experiment.py
       - name: Upload only derived numerical provenance
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
