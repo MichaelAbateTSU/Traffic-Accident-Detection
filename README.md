@@ -134,10 +134,13 @@ pip install -r requirements.txt
 
 The YOLO model (`yolo11x.pt`) is downloaded automatically by Ultralytics on first run.
 
+`requirements.txt` includes `setuptools<81` because DeepSORT's PyTorch embedder uses the deprecated `pkg_resources` API to locate its bundled model weights but does not declare that runtime dependency. This also covers Python 3.12+ virtual environments, which no longer include setuptools by default. Keep this constraint until DeepSORT removes that dependency.
+
 ### Verify installation
 
 ```bash
 python -c "from ultralytics import YOLO; import cv2; import fastapi; print('All packages OK')"
+python -c "from tracker import DeepSortTracker; DeepSortTracker(); print('DeepSORT embedder OK')"
 ```
 
 ---
@@ -660,6 +663,8 @@ pytest -q
 ```
 
 The HTTP contract tests stub unavailable ML dependencies, so they run without a GPU or model weights. Saved-frame tests use a mocked inference pipeline with real OpenCV JPEG writes and HTTP artifact reads; they are skipped if OpenCV is missing.
+
+`tests/test_runtime_installation.py` checks genuine DeepSORT initialization in a fresh subprocess (no ML stubs) when the full runtime dependencies are installed. It loads the bundled MobileNet weights without downloading YOLO weights and is skipped in HTTP-only test environments.
 
 ---
 
