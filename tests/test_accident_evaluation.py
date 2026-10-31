@@ -63,16 +63,44 @@ def test_metrics_use_event_overlap_ignore_unknown_and_expose_false_alarms():
         [True, False, False, True, True, True, True, False], 10,
     )
     assert result["frame_confusion"] == {"tp": 2, "fp": 2, "tn": 2, "fn": 1}
-    assert result["event_count"] == result["detected_events"] == 1
-    assert result["events"][0]["latency_seconds"] == 0.1
-    assert result["false_alarm_episodes"] == 2
+    assert result["event_count"] is None and result["events"] is None
+    assert result["detected_events"] is None
+    assert result["false_alarm_episodes"] is None
     assert result["ignored_frames"] == 1
     negative = evaluation.clip_metrics([0] * 4, [False, True, True, False], 10)
     summary = evaluation.aggregate_metrics([result, negative])
     assert summary["negative_clip_false_alarm_rate"] == 1
-    assert summary["false_alarm_episodes"] == 3
+    assert summary["false_alarm_episodes"] is None
+    assert summary["event_recall"] is None
+    assert summary["false_alarm_episodes_per_normal_hour"] is None
+    assert summary["dense_label_clip_count"] == summary["incomplete_label_clip_count"] == 1
+
+
+def test_dense_temporal_metrics_preserve_events_latency_and_normal_time():
+    result = evaluation.clip_metrics([0, 0, 1, 1, 1, 0, 0],
+                                     [True, False, False, True, True, False, True], 10)
+    assert result["temporal_metrics_available"]
+    assert result["event_count"] == result["detected_events"] == 1
+    assert result["events"][0]["latency_seconds"] == 0.1
+    assert result["false_alarm_episodes"] == 2
+    summary = evaluation.aggregate_metrics([result])
     assert summary["event_recall"] == 1
-    assert summary["false_alarm_episodes_per_normal_hour"] == pytest.approx(13500)
+    assert summary["false_alarm_episodes_per_normal_hour"] == pytest.approx(18000)
+
+
+def test_sparse_niosh_samples_cannot_manufacture_four_events():
+    labels = [None] * 61
+    for index, label in [(16, 0), (18, 0), (30, 1), (36, 1), (42, 1), (48, 1)]:
+        labels[index] = label
+    result = evaluation.clip_metrics(labels, [False] * 61, 30, clip_label=1)
+    assert result["frame_confusion"] == {"tp": 0, "fp": 0, "tn": 2, "fn": 4}
+    for key in ["events", "event_count", "detected_events", "normal_seconds", "false_alarm_episodes"]:
+        assert result[key] is None
+    summary = evaluation.aggregate_metrics([result])
+    assert summary["labeled_frames"] == 6 and summary["ignored_frames"] == 55
+    assert summary["clip_confusion"]["fn"] == 1
+    assert summary["event_recall"] is None
+    assert summary["normal_hours"] is None
 
 
 def test_all_negative_or_all_positive_metrics_do_not_invent_denominators():
