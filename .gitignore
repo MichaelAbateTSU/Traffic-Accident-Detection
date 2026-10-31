@@ -208,3 +208,6 @@ __marimo__/
 
 # YOLO models
 *.pt
+
+# Locally licensed evaluation media and generated scores (never redistribute)
+evaluation_output/

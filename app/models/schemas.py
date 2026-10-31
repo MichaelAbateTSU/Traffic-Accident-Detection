@@ -25,8 +25,11 @@ class DetectRequest(BaseModel):
     max_frames: int = Field(
         default=5,
         ge=1,
+        le=300,
+        strict=True,
         description=(
-            "Deprecated. The API currently enforces a fixed 5-frame run for every job."
+            "Process 1-300 consecutive frames. Default 5 preserves existing clients; "
+            "request 300 for temporal scoring. Processing may end earlier at source EOF."
         ),
     )
     save_frames: bool = Field(
@@ -63,7 +66,7 @@ class DetectionEvent(BaseModel):
     confidence_score: float = Field(
         ge=0.0,
         le=1.0,
-        description="EMA-smoothed accident confidence score from AccidentScorer.",
+        description="EMA-smoothed heuristic accident score, not a calibrated probability.",
     )
     raw_score: float = Field(
         ge=0.0,

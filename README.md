@@ -14,6 +14,7 @@ A production-ready traffic accident detection system that processes live HLS/RTS
 - [Running the API Server](#running-the-api-server)
 - [API Reference](#api-reference)
 - [Running the Pipeline Directly](#running-the-pipeline-directly)
+- [Evaluating Labeled Accident Frames](#evaluating-labeled-accident-frames)
 - [Configuration](#configuration)
 - [Detection Signals](#detection-signals)
 - [Output](#output)
@@ -205,8 +206,14 @@ Start an accident detection job against a stream URL.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `stream_url` | string (URL) | required | Any source OpenCV can open: HLS, RTSP, MP4 |
-| `max_frames` | integer | `300` | Frame cap (~10 s at 30 fps). Range: 1–18000 |
+| `max_frames` | integer | `5` | Consecutive-frame cap, range 1–300. Explicitly request `300` for temporal signals (~30 s at 10 fps, ~10 s at 30 fps). The default preserves existing clients. |
 | `save_frames` | boolean | `false` | Save raw and annotated images to `pipeline_output/` and publish frame URLs; when false, no images are written or published |
+
+The server now honors `max_frames` instead of forcing every job to five frames.
+The cap bounds per-job inference and optional artifacts; source EOF can end a
+job earlier. `confidence_score` and `peak_confidence` retain their existing names,
+but are **heuristic scores, not calibrated accident probabilities**. YOLO11x is
+COCO-trained vehicle detection, not an accident-trained classifier.
 
 **Response `202 Accepted`:**
 
@@ -746,6 +753,173 @@ python pipeline.py --snapshot-test
 ```
 
 Annotated frames are written to `pipeline_output/` (JPEG, configurable).
+
+---
+
+## Evaluating Labeled Accident Frames
+
+**Tracker-drawn boxes are not accident ground truth.** `captures/labeled/` in the
+snapshot demo contains model annotations, not human accident labels. Use an
+author-labeled temporal dataset, preserve sequence order, and score the complete
+clip with a fresh tracker and scorer. `evaluate_accidents.py` runs the existing
+`_run_yolo -> DeepSortTracker.update -> AccidentScorer.update` chain. It does not
+feed accident labels, annotated boxes, or class names into inference.
+
+### Small DoTA selection
+
+The [DoTA authors](https://github.com/MoonBlvd/Detection-of-Traffic-Anomaly) provide
+per-frame accident labels, official split lists, and extracted clips. Their
+2021-11-13 README update says the original channel authors authorized sharing
+the downloaded/extracted clips for researchers. Cite **Yao et al., DoTA: unsupervised
+detection of traffic anomaly in driving videos, IEEE TPAMI (2022)**. The
+repository's MIT code license is **not** a blanket commercial video license.
+Use the authors' distribution for research, verify permissions for production,
+and do not commit or redistribute downloaded footage or frames.
+
+The following fetches only annotations (~10 MB), not the 55 GB frame archive:
+
+```bash
+mkdir -p downloads/dota
+curl -fL https://raw.githubusercontent.com/MoonBlvd/Detection-of-Traffic-Anomaly/f8f603b8c06a946bc314752947ed480a4f33f82a/dataset/DoTA_annotations.zip -o downloads/dota/DoTA_annotations.zip
+curl -fL https://raw.githubusercontent.com/MoonBlvd/Detection-of-Traffic-Anomaly/f8f603b8c06a946bc314752947ed480a4f33f82a/dataset/val_split.txt -o downloads/dota/val_split.txt
+```
+
+Obtain the selected frame folders using the authors' linked distribution or
+their original-video extraction instructions at **10 fps**. Put each ordered
+sequence under `downloads/dota/frames/<clip_id>/` (an `images/` child is also
+supported). These example IDs come from the official validation split:
+
+```bash
+python prepare_dota.py \
+  --annotations downloads/dota/DoTA_annotations.zip \
+  --split-file downloads/dota/val_split.txt \
+  --frames-root downloads/dota/frames \
+  --positive 0RJPQ_97dcs_000387 \
+  --negative 0qfbmt4G8Rw_001602 \
+  --output downloads/dota/manifest.json
+
+python evaluate_accidents.py \
+  --manifest downloads/dota/manifest.json --split validation \
+  --output evaluation_output/dota-smoke --save-labeled-frames
+```
+
+The importer uses the **actual per-frame annotation**, excludes ignored clips
+and non-selected lane-departure/unknown anomaly classes, and preserves the
+authors' post-event zero labels rather than guessing event boundaries. Post-event
+zeros are not independently collected normal-driving videos. The negative comparison
+is an author-labeled normal **prefix from a different original video**, at least
+30 frames long, not a fully independent normal-driving dataset. This supports a
+small smoke comparison, not a general false-alarm/accuracy estimate. Missing
+media fails explicitly; the importer does not claim to download it.
+
+### Other local videos or frame sequences
+
+For the **ACCIDENT** dataset's official `metadata-real.csv`, an onset timestamp
+does not supply a complete accident interval or independent normal videos. The
+dedicated importer records the positive clip label, retains onset frame/time
+verbatim, decodes actual video frame counts/FPS, and reports disagreements with
+the CSV. It leaves temporal labels unknown instead of inventing accident-end
+times or treating the whole clip as an accident frame:
+
+```bash
+# Download metadata and only the individual selected video from the authors'
+# https://www.kaggle.com/datasets/picekl/accident distribution.
+# Store footage at downloads/accident/real_videos/<original_filename>.mp4.
+python prepare_accident.py --metadata downloads/accident/metadata-real.csv \
+  --media-root downloads/accident --videos e17Wq4Hpqlk_02.mp4 \
+  --normal-prefixes eQvvIoDMXzY_00.mp4 --normal-prefix-frames 100 \
+  --output downloads/accident/manifest.json
+python evaluate_accidents.py --manifest downloads/accident/manifest.json \
+  --output evaluation_output/accident-test --split test
+```
+
+ACCIDENT is **CC BY-NC-SA 4.0** per the authors' Kaggle listing:
+research/noncommercial use, attribution, and applicable share-alike conditions.
+Verify current terms before use; do not redistribute media. Cite the authors'
+[ACCIDENT paper](https://arxiv.org/abs/2604.09819). Onset-only runs report
+clip-level detection/score and first alarm after the supplied onset timestamp;
+frame/event accuracy and normal false-alarm rates remain undefined. Timestamp
+delays are frame-index/FPS approximations, not variable-frame-rate PTS.
+The API's existing `DetectionEvent.timestamp_sec` is **processing wall-clock
+elapsed time**, not media time; never compare it directly with a dataset onset.
+Offline `timestamp_seconds` is derived from decoded frame index and source FPS.
+Optional `--normal-prefixes` uses a different original recording, selecting at
+most 100 frames by default, strictly before **both** author onset fields with a
+frame's margin. These normal labels are onset-derived; the resulting false-alarm
+counts describe the selected prefix only, not population performance.
+Use `prepare_accident.py --clip-frames 120` to explicitly select a production-sized
+positive range (the annotated onset must remain inside it), and
+`evaluate_accidents.py --model yolo11n.pt` to measure the production nano
+configuration separately from the default YOLO11x. Reports identify actual
+weights, inference size, per-clip elapsed time, vehicle detections, confirmed
+track count, and alarm frames; model variants are not interchangeable benchmarks.
+For production preprocessing, add `--max-frame-side 1280`: frames are
+downscaled before both YOLO and DeepSORT, without upscaling smaller inputs.
+Set `OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 INFERENCE_THREADS=2` before
+launching the evaluator to match the production thread environment. This is
+an offline host measurement, not validation of a production VM, live-stream
+network latency, concurrent-camera capacity, or its per-job deadline.
+
+The authors' public GitHub LFS previews can be obtained individually without
+downloading the entire dataset. Two previews have been matched byte-for-byte
+to their Kaggle filenames:
+
+| Kaggle filename | Author preview | SHA-256 |
+|---|---|---|
+| `e17Wq4Hpqlk_02.mp4` | [tbone (3).mp4](https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/main/assets/videos/real-world/tbone%20(3).mp4) | `5bd9ce9b734dcc9b0eda0fb2f0dc98684748a3149907dd79c0ce2a3323ee31dc` |
+| `eQvvIoDMXzY_00.mp4` | [single (3).mp4](https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/main/assets/videos/real-world/single%20(3).mp4) | `ce308189f4f3b6803e67e767a52247e80e1de415381f7e6f3ccb15f357689a41` |
+
+The first preview's webpage filename/category says t-bone, but the author CSV
+says **head-on**. This is a source inconsistency, not a reason to invent labels.
+The CSV records onset `0.72 s` / frame `18`, and 148 frames; OpenCV decodes
+149 frames at 25 fps. The importer uses actual decoded length and retains the
+external onset frame unchanged. Downloaded footage remains local and ignored.
+
+Provide a JSON manifest with `version: 1`, `dataset`, `source_url`, `terms`, and
+`clips`. Each clip needs `clip_id`, `group_id` (original recording, not a derived
+clip ID), `split` (`train`, `validation`, or `test`), local `source`, `fps`, and
+`labels`. Labels are integer **0** (normal), **1** (accident), or **null** (unknown),
+one per selected frame. `source_start_frame` defaults to zero. All indexing is
+zero-based. Paths are relative to the manifest unless absolute.
+Onset-only sources may supply `clip_label` and all-null temporal labels,
+optionally `onset_seconds`, `annotated_onset_frame`, and `annotation_notes`.
+The external onset frame is preserved without guessing its indexing convention.
+
+Preserve original split assignments. Different derived clips of the same
+recording must share a `group_id` and cannot cross splits; duplicate IDs,
+overlapping ranges of the same source, and disguised same-source cross-split
+reuse are rejected. Do not tune thresholds on the held-out evaluation split.
+Use complete sequences, preferably at least 50 frames, with actual declared
+FPS. Video FPS must match within 1%; frames are not silently resampled.
+Image filenames use natural order (`1`, `2`, `10`); corrupt/missing frames and
+early video EOF fail instead of shifting labels.
+
+Default budgets are **3,000 frames per clip**, **6,000 total frames**, and
+**8,294,400 pixels per frame**. Oversized manifests are rejected, never silently
+truncated. Inference is serial on CPU with a fixed seed and two Torch threads.
+The scorer's kinematics/most temporal thresholds remain pixel/frame based:
+FPS, resolution, camera viewpoint, and ego motion affect scores.
+
+Each run writes `summary.json` and `<clip_id>/frames.jsonl`, containing every
+frame's heuristic score, raw signals, track counts, timestamp, and separately
+joined ground truth. `--save-labeled-frames` additionally saves local images
+with tracker boxes, score, and an explicit **Ground truth** banner after
+inference. Outputs and downloaded media are git-ignored.
+
+The summary includes frame confusion counts, frame precision/recall, contiguous
+event recall and detection delays, false-alarm episodes per normal hour, and
+normal-clip false-alarm rate. An alarm episode counts as false if it overlaps no
+labeled accident frame; unknown frames are excluded and break episodes.
+Undefined metrics are `null`, not fabricated zeroes. Manifest/annotation/model
+hashes, decoded sequence hashes, package versions, config, code revision/dirty
+state, device, and seed record reproducibility. Failed runs are explicitly
+marked failed; existing output directories are never overwritten.
+
+**These measurements are not calibrated probabilities.** YOLO11x detects COCO
+vehicles, and the existing scorer uses hand-set signals. Genuine accident
+classification/probability calibration requires separately trained/calibrated
+models and group-separated evaluation data. No labels or accuracy are fabricated
+when external dataset access is unavailable.
 
 ---
 
