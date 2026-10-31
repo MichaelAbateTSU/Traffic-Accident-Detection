@@ -781,6 +781,18 @@ Annotated frames are written to `pipeline_output/` (JPEG, configurable).
 
 ## Evaluating Labeled Accident Frames
 
+**Label coverage:** sampled-frame confusion includes only known labels.
+Any unknown frame makes that clip's event counts, event recall/latency,
+continuous normal time and false-alarm episodes/rates unavailable (`null`),
+with an explicit reason. Sparse positive observations do not define separate
+physical events; unknown frames are never normal. Dense clips retain temporal
+metrics within their selected range, not necessarily complete original events.
+For mixed dense/sparse selections, aggregate temporal metrics are also `null`
+rather than silently evaluating only dense clips. Coverage counts identify
+selected, dense and incomplete clips plus known/unknown frames; per-clip dense
+results remain available. Independently supported clip labels and supplied
+onset measures are retained even for entirely unknown frame labels.
+
 **Tracker-drawn boxes are not accident ground truth.** `captures/labeled/` in the
 snapshot demo contains model annotations, not human accident labels. Use an
 author-labeled temporal dataset, preserve sequence order, and score the complete
@@ -1007,8 +1019,9 @@ inference. Outputs and downloaded media are git-ignored.
 
 The summary includes frame confusion counts, frame precision/recall, contiguous
 event recall and detection delays, false-alarm episodes per normal hour, and
-normal-clip false-alarm rate. An alarm episode counts as false if it overlaps no
-labeled accident frame; unknown frames are excluded and break episodes.
+normal-clip false-alarm rate. For densely labeled clips, an alarm episode counts
+as false if it overlaps no labeled accident frame. Unknown labels disable
+continuous temporal metrics, rather than splitting episodes or inventing events.
 Undefined metrics are `null`, not fabricated zeroes. Manifest/annotation/model
 hashes, decoded sequence hashes, package versions, config, code revision/dirty
 state, device, and seed record reproducibility. Failed runs are explicitly
