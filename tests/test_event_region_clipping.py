@@ -46,3 +46,47 @@ def test_incident_boxes_use_processed_dimensions(frame_pipeline, monkeypatch, si
     box = items[f"{job.job_id}:0"]["bounding_box"]
     assert items[f"{job.job_id}:0"]["boundingBox"] == box == [width - 10.0, height - 10.0, float(width), float(height)]
     assert items[f"{job.job_id}:1"]["bounding_box"] is None
+
+
+def test_production_downscale_boxes_use_resized_frame(frame_pipeline, monkeypatch):
+    client, _, tracker, detector, _, _ = frame_pipeline
+    from unittest.mock import Mock
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "max_frame_dimension", 1280)
+    monkeypatch.setattr("app.services.video_source.open_production_video", Mock(return_value=Mock()))
+    big = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    monkeypatch.setattr(detection_service, "_iter_video", lambda _: iter([big]))
+    scorer = detection_service.AccidentScorer()
+    _, _, meta = scorer.update([], 0)
+    scorer.update.side_effect = [(0.8, True, {**meta, "event_region": (555.5359, 301.486, 1284.5945, 779.45)})]
+    monkeypatch.setattr(detection_service, "AccidentScorer", lambda **kw: scorer)
+    job = job_store.create("https://cams.example.com/cam-c/playlist.m3u8")
+    detection_service.run_detection_job(job.job_id, job.stream_url, 1, object())
+    assert detector.call_args.args[1].shape[:2] == (720, 1280)
+    assert tracker.update.call_args.args[1].shape[:2] == (720, 1280)
+    assert scorer.update.call_args.args[0] == []  # tracker output passes through unchanged
+    expected = [555.5359, 301.486, 1280.0, 720.0]
+    assert job_store.get(job.job_id).events[0].bounding_box == expected
+    assert client.get("/incidents").json()["data"][0]["bounding_box"] == expected
+
+
+def test_prefix_persisted_event_box_survives_reload_unchanged(tmp_path):
+    from datetime import datetime, timezone
+    from app.models.schemas import DetectionEvent, SignalValues
+    from app.services.job_store import JobStore
+    path = str(tmp_path / "jobs.sqlite3")
+    store = JobStore(database_path=path, start_reaper=False)
+    job = store.create("https://cams.example.com/cam-d/playlist.m3u8")
+    legacy_box = [555.5359, 301.486, 1284.5945, 779.45]
+    event = DetectionEvent(
+        frame_idx=127, timestamp_sec=1.0, accident_detected=True, confidence_score=.8, raw_score=.8,
+        bounding_box=legacy_box, signal_values=SignalValues(
+            sudden_stop=0, abrupt_decel=0, collision_iou=0, post_collision=0, traffic_anomaly=0))
+    store.update(job.job_id, status="complete", events=[event], completed_at=datetime.now(timezone.utc))
+    store._db.close()
+    restarted = JobStore(database_path=path, start_reaper=False)
+    try:
+        assert restarted.get(job.job_id).events[0].bounding_box == legacy_box
+        assert restarted.get_incident(f"{job.job_id}:127")["event"].bounding_box == legacy_box
+    finally:
+        restarted._db.close()

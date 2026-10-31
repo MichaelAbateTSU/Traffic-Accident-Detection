@@ -80,8 +80,10 @@ class DetectionEvent(BaseModel):
     bounding_box: list[float] | None = Field(
         default=None,
         description=("[x1, y1, x2, y2] pixel coordinates in the processed frame (after any "
-                     "production downscale; origin top-left), clipped to the visible frame. "
-                     "Null if unavailable or entirely outside the frame."),
+                     "production downscale; origin top-left), clipped to the visible frame for jobs "
+                     "processed with this behavior; events persisted by older versions are "
+                     "returned unchanged and may extend outside the frame. Null if unavailable "
+                     "or entirely outside the frame."),
     )
     involved_track_ids: list[int] = Field(
         default_factory=list,
