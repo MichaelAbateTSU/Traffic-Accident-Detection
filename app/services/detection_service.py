@@ -217,7 +217,11 @@ def run_detection_job(
     cap = None
     failure = None
     try:
-        tracker = DeepSortTracker()
+        tracker = (
+            DeepSortTracker()
+            if settings.deepsort_embedder_batch_size == 16
+            else DeepSortTracker(embedder_batch_size=settings.deepsort_embedder_batch_size)
+        )
         scorer = (
             AccidentScorer() if settings.experimental_scorer_source_fps is None
             else AccidentScorer(timebase="experimental_constant_fps",

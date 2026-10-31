@@ -24,7 +24,9 @@ import config
 class DeepSortTracker:
     """Thin wrapper around deep-sort-realtime's DeepSort tracker."""
 
-    def __init__(self):
+    def __init__(self, *, embedder_batch_size: int = 16):
+        if type(embedder_batch_size) is not int or not 1 <= embedder_batch_size <= 16:
+            raise ValueError("embedder_batch_size must be an integer from 1 to 16")
         self._tracker = DeepSort(
             max_age=config.DEEPSORT_MAX_AGE,
             n_init=config.DEEPSORT_N_INIT,
@@ -32,6 +34,8 @@ class DeepSortTracker:
             max_cosine_distance=config.DEEPSORT_MAX_COSINE_DIST,
             nn_budget=config.DEEPSORT_NN_BUDGET,
         )
+        # DeepSort hardcodes 16 at construction; its MobileNet embedder exposes this limit.
+        self._tracker.embedder.max_batch_size = embedder_batch_size
 
         # Colour palette: one colour per track ID (cycling)
         # Using golden-ratio hue spacing so adjacent IDs look distinct

@@ -18,8 +18,14 @@ from test_saved_frames import frame_pipeline
 
 
 @pytest.mark.parametrize("queue_delay", [0, 120])
-def test_worker_uses_paired_actual_start_not_admission(frame_pipeline, monkeypatch, queue_delay):
-    client, _, _, _, _, _ = frame_pipeline
+@pytest.mark.parametrize("embedder_batch", [16, 2])
+def test_worker_uses_paired_actual_start_not_admission(
+    frame_pipeline, monkeypatch, queue_delay, embedder_batch
+):
+    client, _, tracker, _, _, _ = frame_pipeline
+    factory = Mock(return_value=tracker)
+    monkeypatch.setattr(detection_service, "DeepSortTracker", factory)
+    monkeypatch.setattr(detection_service.settings, "deepsort_embedder_batch_size", embedder_batch)
     start = datetime.now(timezone.utc)
     created = start - timedelta(seconds=queue_delay)
     job = job_store.create("https://cams.example.com/cam-a.m3u8")
@@ -29,6 +35,9 @@ def test_worker_uses_paired_actual_start_not_admission(frame_pipeline, monkeypat
     monkeypatch.setattr(detection_service, "time", Mock(monotonic=Mock(side_effect=[100, 102, 103])))
     detection_service.run_detection_job(job.job_id, job.stream_url, 1, object())
     result = job_store.get(job.job_id)
+    factory.assert_called_once_with(**(
+        {} if embedder_batch == 16 else {"embedder_batch_size": embedder_batch}
+    ))
     assert result.status == "complete"
     assert result.created_at == created and result.started_at == start
     assert result.events[0].timestamp_sec == 3
