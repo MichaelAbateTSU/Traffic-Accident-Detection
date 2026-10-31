@@ -912,3 +912,84 @@ def test_shutdown_failure_transitions_do_not_stack_busy_waits(queued_client, mon
     finally:
         blocker.rollback()
         blocker.close()
+
+
+@pytest.mark.parametrize("write", ["expired-get", "expired-post", "new-post"])
+def test_keyed_request_writer_contention_keeps_same_loop_reads_responsive(queued_client, monkeypatch, tmp_path, write):
+    client, store, _, _, _ = queued_client
+    key = submission_key()
+    original, _, _ = store.create_submission(key, SOURCES[0], max_frames=5, save_frames=False, capacity=10)
+    store._db.execute("PRAGMA busy_timeout=200")
+    blocker = sqlite3.connect(store._db.execute("PRAGMA database_list").fetchone()[2])
+    blocker.execute("BEGIN IMMEDIATE")
+    entered = threading.Event()
+    method = "_identify_submission_locked" if write.startswith("expired") else "_reap_receipts_locked"
+    original_method = getattr(store, method)
+    def observe(*args):
+        entered.set()
+        return original_method(*args)
+    monkeypatch.setattr(store, method, observe)
+    write_key = (f"v1.{int(time.time()) - 86401}.{uuid.uuid4()}" if write.startswith("expired")
+                 else submission_key())
+    def request():
+        if write == "expired-get":
+            return client.get("/detection-submissions/v1", headers={"Idempotency-Key": write_key})
+        return client.post("/detection-submissions/v1", json={"stream_url": SOURCES[1]},
+                           headers={"Idempotency-Key": write_key})
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            start = time.monotonic()
+            future = pool.submit(request)
+            assert entered.wait(2)
+            health_start = time.monotonic()
+            health = client.get("/health")
+            health_latency = time.monotonic() - health_start
+            response = future.result(timeout=2)
+            write_latency = time.monotonic() - start
+        assert health.status_code == 200 and health_latency < 0.1, f"Health blocked {health_latency:.4f}s"
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "submission_storage_unavailable"
+        assert response.headers["retry-after"] == "10"
+        if write == "expired-get":
+            assert response.headers["cache-control"] == "no-store"
+        replay = client.get("/detection-submissions/v1", headers={"Idempotency-Key": key})
+        assert replay.status_code == 200 and replay.json()["job_id"] == original.job_id
+        replay_post = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]},
+                                  headers={"Idempotency-Key": key})
+        assert replay_post.status_code == 200 and replay_post.json()["job_id"] == original.job_id
+        assert store._db.execute("PRAGMA busy_timeout").fetchone()[0] == 200
+        assert len(store.all_jobs()) == len(store._submission_receipts) == 1
+        unknown = client.get("/detection-submissions/v1", headers={"Idempotency-Key": submission_key()})
+        assert unknown.status_code == 404
+        invalid = client.get("/detection-submissions/v1", headers={"Idempotency-Key": "invalid"})
+        assert invalid.status_code == 422
+        blocker.rollback()
+        retry = request()
+        assert retry.status_code == (410 if write.startswith("expired") else 202)
+        if write == "new-post":
+            repeat = request()
+            assert repeat.status_code == 200 and repeat.json()["job_id"] == retry.json()["job_id"]
+        snapshot_path = str(tmp_path / "contended-restart.sqlite3")
+        snapshot = sqlite3.connect(snapshot_path)
+        with store._lock:
+            store._db.backup(snapshot)
+        snapshot.close()
+        restarted = JobStore(database_path=snapshot_path, start_reaper=False)
+        try:
+            if write == "new-post":
+                recovered, _, _ = restarted.create_submission(
+                    write_key, SOURCES[1], max_frames=5, save_frames=False, capacity=10,
+                )
+                assert recovered.job_id == retry.json()["job_id"] and recovered.status == "failed"
+            else:
+                from app.services.submission_identity import SubmissionIdentityError
+                with pytest.raises(SubmissionIdentityError) as error:
+                    restarted.find_submission(write_key)
+                assert error.value.code == "idempotency_key_expired"
+        finally:
+            restarted._db.close()
+        print(f"{write}: request {write_latency:.4f}s; concurrent health {health_latency:.4f}s")
+    finally:
+        blocker.rollback()
+        blocker.close()

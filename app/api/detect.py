@@ -17,6 +17,7 @@ POST /detection-submissions/v1
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
@@ -59,6 +60,14 @@ def _identity_error(exc: SubmissionIdentityError) -> HTTPException:
                          detail={"code": exc.code, "message": str(exc)})
 
 
+def _storage_error() -> HTTPException:
+    logger.exception("SQLite submission storage unavailable; retry the same identity after recovery.")
+    return HTTPException(status_code=503, headers={"Retry-After": "10"}, detail={
+        "code": "submission_storage_unavailable",
+        "message": "Submission storage is unavailable. Retry the same identity after storage recovers.",
+    })
+
+
 def _check_single_identity_header(request: Request) -> None:
     if len(request.headers.getlist("idempotency-key")) != 1:
         raise HTTPException(status_code=422, detail={
@@ -91,6 +100,8 @@ async def find_submission(
     _check_single_identity_header(request)
     try:
         job, expires_at = job_store.find_submission(idempotency_key)
+    except sqlite3.OperationalError as exc:
+        raise _storage_error() from exc
     except SubmissionIdentityError as exc:
         raise _identity_error(exc) from exc
     if job is None:
@@ -167,6 +178,8 @@ async def _submit_detection(
             existing, expires_at = job_store.lookup_submission(
                 idempotency_key, stream_url, body.max_frames, body.save_frames,
             )
+        except sqlite3.OperationalError as exc:
+            raise _storage_error() from exc
         except SubmissionIdentityError as exc:
             raise _identity_error(exc) from exc
         if existing is not None:
@@ -199,6 +212,10 @@ async def _submit_detection(
             if replayed:
                 response.status_code = 200
                 return _replay_response(job, request, expires_at)
+    except sqlite3.OperationalError as exc:
+        if idempotency_key is None:
+            raise
+        raise _storage_error() from exc
     except SubmissionIdentityError as exc:
         raise _identity_error(exc) from exc
     except JobCapacityError as exc:

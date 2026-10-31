@@ -304,7 +304,7 @@ class JobStore:
 
     def find_submission(self, key: str) -> tuple[DetectionResult | None, datetime]:
         """Read-only identity reconciliation; absence is not an admission fence."""
-        with self._lock:
+        with self._lock, self._nonblocking_maintenance_locked():
             self._require_submission_storage()
             identity, expires_at = self._identify_submission_locked(key, _utcnow())
             return self._lookup_submission_locked(identity, None), expires_at
@@ -312,7 +312,7 @@ class JobStore:
     def lookup_submission(
         self, key: str, stream_url: str, max_frames: int, save_frames: bool,
     ) -> tuple[DetectionResult | None, datetime]:
-        with self._lock:
+        with self._lock, self._nonblocking_maintenance_locked():
             self._require_submission_storage()
             identity, expires_at = self._identify_submission_locked(key, _utcnow())
             fingerprint = request_fingerprint(stream_url, max_frames, save_frames)
@@ -323,7 +323,7 @@ class JobStore:
         capacity: int,
     ) -> tuple[DetectionResult, bool, datetime]:
         """Reserve the identity and job atomically; only the winner may enqueue."""
-        with self._lock:
+        with self._lock, self._nonblocking_maintenance_locked():
             self._require_submission_storage()
             now = _utcnow()
             identity, expires_at = self._identify_submission_locked(key, now)

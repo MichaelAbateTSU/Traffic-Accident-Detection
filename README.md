@@ -264,6 +264,7 @@ the original job on replay.
 | **410** | `idempotency_key_expired` or `idempotency_result_expired`: identity is too old, or original result was removed. **Never** schedules work. Show that reconciliation is unavailable; do not automatically replace the key. A deliberately initiated new run requires a new identity. |
 | **422** | Invalid request/header, missing/duplicate headers, malformed identity, or `idempotency_key_in_future` (more than 60 seconds ahead of the effective server clock). New identities require a reasonably synchronized clock. Correct the input; do not replace a previously sent identity just to bypass an uncertainty. |
 | **503** | No model/queue, job/receipt capacity exhausted, or `idempotency_unavailable` (no durable store). Before reservation these create no receipt; retry **the same identity** with backoff. Capacity rejections include `Retry-After: 10`. |
+| **503** with `submission_storage_unavailable` | A keyed SQLite operation failed (including writer contention). Logged with traceback; `Retry-After: 10`. Retry the same identity. Failed reservation transactions roll back. An expired-key request cannot return definitive 410 until its required clock fence commits. Lookup errors retain `Cache-Control: no-store`. |
 | **503** with `inference_admission_failed` | Reservation persisted but queue admission failed. `detail` includes original `job_id` and `idempotency_expires_at`; original job becomes `failed`. If the failure write is blocked, the message explicitly says it is awaiting storage recovery, and polling/replay retains the last durably recorded nonterminal state until recovery. Same-key POST never schedules another. |
 | **401 / 403** | Authentication or current source approval denied; no scheduling or reconciliation data. |
 | **404** on versioned POST | Endpoint unavailable on a legacy/downgraded/misconfigured backend. Do not fall back to the old endpoint, replace the identity or treat this as proof that a previous submission was not accepted. |
@@ -355,11 +356,17 @@ resubmits inference. The registry is bounded by retained nonterminal jobs, and
 attempts use SQLite's finite connection timeout rather than an indefinite
 event-loop retry for normal request writes. Maintenance and known-failure
 transitions temporarily use a zero SQLite busy timeout while holding the store
-lock, then restore the connection setting even on errors. Thus a contended
+lock, then restore the connection setting even on errors. Keyed request
+operations use the same zero-contention-wait scope and report SQLite operational
+failures as explicit retryable 503 responses. Thus a contended
 writer cannot stack one busy wait per recovery intent, receipt write, or
 shutdown failure transition. Failed attempts remain logged and pending for the
 next scheduled cycle. This bounds SQLite contention waits, not filesystem I/O,
 fsync, artifact removal or logging latency; it is not a hard HTTP latency SLA.
+Legacy keyless and ordinary worker writes retain their existing SQLite timeout;
+this is not a general guarantee that every API operation remains responsive
+during disk failure or contention. Programming/integrity errors are not
+converted into retryable contention responses.
 No replacement thread is spawned per failed job. Persistent
 storage faults remain visible in logs and may hold admission capacity until
 recovery. Polling/replay reports the last persisted `pending`/`running` state,
