@@ -6,6 +6,8 @@ represent ground-truth accidents or measure model accuracy.
 
 import json
 import math
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -44,8 +46,9 @@ def overlap(t):
     return [(-100 + 100 * min(t, 0.95), 0), (100 - 100 * min(t, 0.95), 0)]
 
 
-def sample(trajectory, fps, seconds=4, stride=1):
-    scorer = AccidentScorer()
+def sample(trajectory, fps, seconds=4, stride=1, experimental=False):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=fps)
+              if experimental else AccidentScorer())
     rows = []
     for idx in range(0, round(seconds * fps) + 1, stride):
         score, flag, meta = scorer.update(tracks_at(trajectory(idx / fps)), idx)
@@ -209,8 +212,9 @@ def frames_for(count):
 @pytest.mark.parametrize("fps", [10, 25])
 @pytest.mark.parametrize("trajectory", [steady, braking, overlap])
 @pytest.mark.parametrize("entry", ["production", "cli", "evaluation"])
+@pytest.mark.parametrize("experimental", [False, True])
 def test_real_entry_points_match_legacy_scorer_without_source_fps(
-    fps, trajectory, entry, fake_components, monkeypatch, tmp_path, capsys,
+    fps, trajectory, entry, experimental, fake_components, monkeypatch, tmp_path, capsys,
 ):
     import evaluate_accidents as evaluation
     from app.core.config import settings
@@ -218,7 +222,7 @@ def test_real_entry_points_match_legacy_scorer_without_source_fps(
     from app.services.job_store import JobStore
 
     pipeline, fake_tracker = fake_components
-    _, expected = sample(trajectory, fps)
+    _, expected = sample(trajectory, fps, experimental=experimental)
     frames = frames_for(len(expected))
     detector = lambda model, frame: tracks_at(trajectory(int(frame[0, 0, 0]) / fps))
     monkeypatch.setattr(pipeline, "_run_yolo", detector)
@@ -232,6 +236,7 @@ def test_real_entry_points_match_legacy_scorer_without_source_fps(
 
     if entry == "production":
         monkeypatch.setattr(settings, "environment", "production")
+        monkeypatch.setattr(settings, "experimental_scorer_source_fps", fps if experimental else None)
         store = JobStore(start_reaper=False)
         monkeypatch.setattr(detection_service, "job_store", store)
         job = store.create("https://example.com/video")
@@ -243,7 +248,8 @@ def test_real_entry_points_match_legacy_scorer_without_source_fps(
         assert result.accident_detected == any(row[2] for row in expected)
         cap.get.assert_called_once_with(5)
     elif entry == "cli":
-        pipeline.run_pipeline("synthetic.mp4", display=False)
+        pipeline.run_pipeline("synthetic.mp4", display=False,
+                              experimental_scorer_source_fps=fps if experimental else None)
         output = capsys.readouterr().out
         assert f"Final accident score : {expected[-1][1]:.3f}" in output
         assert f"FPS    : {fps:.1f}" in output
@@ -252,7 +258,7 @@ def test_real_entry_points_match_legacy_scorer_without_source_fps(
                                source=str(tmp_path), fps=fps, labels=[None] * len(frames),
                                clip_label=1)
         monkeypatch.setattr(evaluation, "iter_clip_frames", lambda _: (f for f in frames))
-        result = evaluation.evaluate_clip(clip, object(), tmp_path)
+        result = evaluation.evaluate_clip(clip, object(), tmp_path, experimental_constant_fps=experimental)
         rows = [json.loads(line) for line in
                 (tmp_path / "synthetic" / "frames.jsonl").read_text().splitlines()]
         assert result["peak_score"] == max(row[1] for row in expected)
@@ -262,8 +268,9 @@ def test_real_entry_points_match_legacy_scorer_without_source_fps(
 
 
 @pytest.mark.parametrize("fps", [10, 25])
+@pytest.mark.parametrize("experimental", [False, True])
 def test_snapshot_waits_do_not_advance_source_frame_indices(
-    fps, fake_components, monkeypatch, tmp_path,
+    fps, experimental, fake_components, monkeypatch, tmp_path,
 ):
     pipeline, _ = fake_components
     monkeypatch.chdir(tmp_path)
@@ -278,12 +285,19 @@ def test_snapshot_waits_do_not_advance_source_frame_indices(
     monkeypatch.setattr(pipeline, "_open_video", lambda _: cap)
     monkeypatch.setattr(pipeline, "_run_yolo",
                         lambda model, frame: tracks_at(steady(int(frame[0, 0, 0]) / fps)))
-    pipeline.run_snapshot_test("synthetic.mp4", display=False)
-    _, expected = sample(steady, fps, seconds=(pipeline.SNAPSHOT_FRAME_COUNT - 1) / fps)
+    pipeline.run_snapshot_test("synthetic.mp4", display=False,
+                               experimental_scorer_source_fps=fps if experimental else None)
+    _, expected = sample(steady, fps, seconds=(pipeline.SNAPSHOT_FRAME_COUNT - 1) / fps,
+                         experimental=experimental)
     actual = json.loads((tmp_path / "captures" / "final_score.json").read_text())
     assert actual["frame_scores"] == [row[1] for row in expected]
     assert waits.call_count == pipeline.SNAPSHOT_FRAME_COUNT - 1
     assert all(call.args == (pipeline.SNAPSHOT_INTERVAL_SECONDS,) for call in waits.call_args_list)
+    if experimental:
+        assert actual["timebase"] == "experimental_constant_fps"
+        assert actual["source_fps"] == fps
+    else:
+        assert "timebase" not in actual
 
 
 @pytest.mark.parametrize("fps", [None, 0, -1, float("nan"), float("inf")])
@@ -349,3 +363,303 @@ def test_evaluation_decoder_rejects_invalid_or_mismatched_fps(fps, tmp_path, mon
         list(iter_clip_frames(clip))
     cap.release.assert_called_once()
     cap.read.assert_not_called()
+
+
+@pytest.mark.parametrize("fps", [5, 10, 23, 25, 50])
+def test_experimental_reference_motion_and_signal_differences_are_quantified(fps):
+    scorer, steady_rows = sample(steady, fps, experimental=True)
+    assert peak_signal(steady_rows, "sudden_stop") == 0
+    assert scorer._records[1].history[-1].speed == pytest.approx(10, rel=0.0001)
+    peaks = []
+    for trajectory in (braking, overlap):
+        _, reference = sample(trajectory, 10)
+        _, measured = sample(trajectory, fps, experimental=True)
+        difference = abs(max(row[1] for row in measured) - max(row[1] for row in reference))
+        assert difference <= 0.003
+        assert abs(first_signal(measured, "sudden_stop") - first_signal(reference, "sudden_stop")) <= 2 / fps
+        peaks.append(max(row[1] for row in measured))
+    _, rows = sample(braking, fps, experimental=True)
+    assert peak_signal(rows, "abrupt_decel") == 1
+    print(f"\nexperimental fps={fps} braking_peak={peaks[0]} overlap_peak={peaks[1]}")
+
+
+@pytest.mark.parametrize("trajectory", [
+    steady, braking, overlap,
+    lambda t: [(1000 * (t if t <= 1 else 2 - t), 0)],
+    lambda t: [(1000 * min(t, 1), 1000 * max(t - 1, 0))],
+    lambda _: [(0, 0), (0, 100)],
+])
+def test_experimental_ten_fps_preserves_dense_legacy_outputs_exactly(trajectory):
+    legacy, expected = sample(trajectory, 10)
+    experimental, measured = sample(trajectory, 10, experimental=True)
+    for wanted, actual in zip(expected, measured):
+        meta = dict(actual[3])
+        assert meta.pop("timebase") == "experimental_constant_fps"
+        assert meta.pop("source_fps") == 10
+        assert (actual[0], actual[1], actual[2], meta) == wanted
+    assert experimental._smoothed_score == legacy._smoothed_score
+
+
+@pytest.mark.parametrize("fps", [5, 10, 23, 25, 50])
+def test_experimental_time_windows_and_emas_have_reference_durations(fps):
+    _, rows = sample(lambda _: [(0, 0)], fps, seconds=2, experimental=True)
+    onset = first_signal(rows, "sudden_stop")
+    assert 0.4 - 1e-9 <= onset <= 0.4 + 1 / fps
+    observed_ticks = sum(row[3]["signal_values"]["sudden_stop"] > 0 for row in rows)
+    expected = 0.125 * (1 - 0.7 ** (observed_ticks * 10 / fps))
+    assert rows[-1][1] == round(expected, 4)
+    scorer, _ = sample(steady, fps, seconds=12, experimental=True)
+    history = scorer._records[1].history
+    assert 49 - 1e-9 <= history[-1].frame_idx - history[0].frame_idx < 49 + 10 / fps + 1e-9
+    pair = frozenset({1, 2})
+    scorer._collision_events[pair] = 120
+    scorer.update([], 13 * fps)
+    assert 1 in scorer._records
+    scorer.update([], 13 * fps + 1)
+    assert 1 not in scorer._records
+    scorer.update([], math.floor(13.5 * fps))
+    assert pair in scorer._collision_events
+    scorer.update([], math.floor(13.5 * fps) + 1)
+    assert pair not in scorer._collision_events
+
+
+@pytest.mark.parametrize("fps", [5, 10, 23, 25, 50])
+@pytest.mark.parametrize("gap_kind", ["skipped_index", "missing_track"])
+def test_experimental_gaps_break_evidence_and_do_not_invent_motion(fps, gap_kind):
+    scorer, _ = sample(lambda _: [(0, 0)], fps, seconds=1, experimental=True)
+    before = scorer._smoothed_score
+    if gap_kind == "skipped_index":
+        _, _, meta = scorer.update(tracks_at([(1000, 0)]), fps + 3)
+        expected = before * 0.7 ** (30 / fps)
+    else:
+        _, _, missing = scorer.update([], fps + 1)
+        assert all(value == 0 for value in missing["signal_values"].values())
+        _, _, meta = scorer.update(tracks_at([(1000, 0)]), fps + 2)
+        expected = before * 0.7 ** (20 / fps)
+    assert len(scorer._records[1].history) == 1
+    assert scorer._records[1].history[-1].speed == 0
+    assert all(value == 0 for value in meta["signal_values"].values())
+    assert scorer._smoothed_score == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("fps", [10, 25])
+def test_experimental_sparse_histories_do_not_claim_continuous_stop_evidence(fps):
+    scorer, rows = sample(lambda _: [(0, 0)], fps, stride=2, experimental=True)
+    assert all(row[1] == 0 for row in rows)
+    assert len(scorer._records[1].history) == 1
+
+
+@pytest.mark.parametrize("fps", [5, 10, 25, 50])
+def test_experimental_missing_track_never_creates_a_new_collision(fps):
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=fps)
+    scorer.update(tracks_at([(-30, 0), (30, 0)]), 0)
+    scorer.update(tracks_at([(-20, 0), (20, 0)]), 1)
+    one_track = tracks_at([(-10, 0)])
+    _, _, meta = scorer.update(one_track, 2)
+    assert meta["signal_values"]["collision_iou"] == 0
+    assert not scorer._collision_events
+
+
+def test_experimental_predicted_only_deepsort_tracks_break_evidence():
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+    for idx in range(26):
+        observed = tracks_at([(0, 0)])
+        observed[0].time_since_update = 0
+        scorer.update(observed, idx)
+    predicted = tracks_at([(0, 0)])
+    predicted[0].time_since_update = 1
+    _, _, meta = scorer.update(predicted, 26)
+    assert all(value == 0 for value in meta["signal_values"].values())
+    scorer.update(tracks_at([(1000, 0)]), 27)
+    assert len(scorer._records[1].history) == 1
+
+
+@pytest.mark.parametrize("age", [-1, True, 0.5, "0"])
+def test_experimental_rejects_malformed_prediction_age(age):
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+    track = tracks_at([(0, 0)])
+    track[0].time_since_update = age
+    with pytest.raises(ValueError, match="time_since_update"):
+        scorer.update(track, 0)
+
+
+@pytest.mark.parametrize("fps", [5, 10, 23, 25, 50])
+def test_experimental_post_collision_direction_has_reference_time_memory(fps):
+    scorer, _ = sample(lambda t: [(10000 * t, 0)], fps, seconds=1, experimental=True)
+    scorer._collision_events[frozenset({1, 2})] = 10
+    rows = []
+    for idx in range(fps + 1, 2 * fps + 1):
+        _, _, meta = scorer.update(tracks_at([(10000 * (2 - idx / fps), 0)]), idx)
+        rows.append((idx / fps, meta["signal_values"]["post_collision"]))
+    assert max(value for _, value in rows) == 1
+    last = max(t for t, value in rows if value > 0)
+    # Two observed endpoints bracket the reference-lag angle and window edge.
+    assert abs(last - 1.5) <= 2 / fps + 1e-9
+
+
+@pytest.mark.parametrize("fps", [None, 0, -1, True, False, "25", float("nan"), float("inf"), 1e-323])
+def test_experimental_constructor_requires_explicit_valid_trusted_timing(fps):
+    with pytest.raises(ValueError, match="source_fps"):
+        AccidentScorer(timebase="experimental_constant_fps", source_fps=fps)
+
+
+def test_experimental_extreme_timing_fails_explicitly_before_advancing_clock():
+    with pytest.raises(ValueError, match="source_fps"):
+        AccidentScorer(timebase="experimental_constant_fps", source_fps=10 ** 400)
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+    scorer.update([], 0)
+    with pytest.raises(ValueError, match="timebase range"):
+        scorer.update([], 10 ** 400)
+    assert scorer.update([], 1)[0] == 0
+
+
+def test_ten_fps_hysteresis_is_exact_and_gap_decay_clears_alarm(monkeypatch):
+    legacy = AccidentScorer()
+    experimental = AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+    signals = {name: 1.0 for name in legacy._compute_signals(0)}
+    for scorer in (legacy, experimental):
+        monkeypatch.setattr(scorer, "_compute_signals",
+                            lambda idx: {name: float(idx < 20) for name in signals})
+    flags = []
+    for idx in range(40):
+        expected = legacy.update([], idx)
+        actual = experimental.update([], idx)
+        assert actual[:2] == expected[:2]
+        flags.append(actual[1])
+    assert any(flags)
+    assert flags[-1] is False
+    experimental.reset()
+    for idx in range(20):
+        experimental.update([], idx)
+    assert experimental._accident_detected
+    score, alarm, _ = experimental.update([], 100)
+    assert score == 0
+    assert not alarm
+
+
+def test_scorer_rejects_ambiguous_timebase_and_legacy_fps_and_reset_restores_clock():
+    with pytest.raises(ValueError, match="Unknown scorer timebase"):
+        AccidentScorer(timebase="constant_fps")
+    with pytest.raises(ValueError, match="requires"):
+        AccidentScorer(source_fps=25)
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+    first = scorer.update(tracks_at([(0, 0)]), 0)
+    scorer.update(tracks_at([(10, 0)]), 1)
+    scorer.reset()
+    assert scorer.update(tracks_at([(0, 0)]), 0) == first
+
+
+@pytest.mark.parametrize("index", [True, -1, 0.5, float("nan"), float("inf"), "1", 0])
+def test_experimental_source_indices_are_validated_even_without_tracks(index):
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+    scorer.update([], 0)
+    with pytest.raises(ValueError, match="source frame indices"):
+        scorer.update([], index)
+
+
+@pytest.mark.parametrize("fps", [0, -1, True, float("nan"), float("inf")])
+def test_service_settings_reject_malformed_experimental_timing(fps):
+    from app.core.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, experimental_scorer_source_fps=fps)
+
+
+@pytest.mark.parametrize("entry", ["production", "cli", "snapshot"])
+@pytest.mark.parametrize("fps", [0, -1, float("nan"), float("inf")])
+def test_entry_points_explicitly_fail_malformed_experimental_timing(
+    entry, fps, fake_components, monkeypatch, tmp_path,
+):
+    from app.core.config import settings
+    from app.services import detection_service
+    from app.services.job_store import JobStore
+    pipeline, fake_tracker = fake_components
+    if entry == "production":
+        store = JobStore(start_reaper=False)
+        monkeypatch.setattr(detection_service, "job_store", store)
+        monkeypatch.setattr(detection_service, "DeepSortTracker", lambda: fake_tracker)
+        monkeypatch.setattr(settings, "experimental_scorer_source_fps", fps)
+        job = store.create("https://example.com/video")
+        detection_service.run_detection_job(job.job_id, job.stream_url, 1, object())
+        result = store.get(job.job_id)
+        assert result.status == "failed"
+        assert "source_fps" in result.error
+    else:
+        monkeypatch.setattr(pipeline, "_prepare_snapshot_dirs", lambda: None)
+        method = pipeline.run_pipeline if entry == "cli" else pipeline.run_snapshot_test
+        with pytest.raises(ValueError, match="source_fps"):
+            method("synthetic.mp4", display=False, experimental_scorer_source_fps=fps)
+
+
+def test_explicit_service_rate_is_not_replaced_by_unreliable_nominal_capture(
+    fake_components, monkeypatch,
+):
+    from app.core.config import settings
+    from app.services import detection_service, video_source
+    from app.services.job_store import JobStore
+    _, fake_tracker = fake_components
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "experimental_scorer_source_fps", 25)
+    monkeypatch.setattr(detection_service, "DeepSortTracker", lambda: fake_tracker)
+    monkeypatch.setattr(detection_service, "_run_yolo",
+                        lambda model, frame: tracks_at(steady(int(frame[0, 0, 0]) / 25)))
+    cap = Mock()
+    cap.get.return_value = float("nan")
+    cap.read.side_effect = [(True, f) for f in frames_for(101)] + [(False, None)]
+    monkeypatch.setattr(video_source, "open_production_video", lambda _: cap)
+    store = JobStore(start_reaper=False)
+    monkeypatch.setattr(detection_service, "job_store", store)
+    job = store.create("https://example.com/video")
+    detection_service.run_detection_job(job.job_id, job.stream_url, 101, object())
+    result = store.get(job.job_id)
+    assert result.status == "complete"
+    assert result.peak_confidence == 0
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+def test_evaluator_flag_reaches_scorer_and_provenance_without_loading_models(
+    experimental, fake_components, monkeypatch, tmp_path,
+):
+    import evaluate_accidents as evaluation
+    import ultralytics
+    pipeline, _ = fake_components
+    torch = types.ModuleType("torch")
+    torch.manual_seed = Mock()
+    torch.set_num_threads = Mock()
+    torch.get_num_threads = Mock(return_value=2)
+    torch.use_deterministic_algorithms = Mock()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    weights = tmp_path / "synthetic.pt"
+    weights.write_bytes(b"synthetic fixture, never loaded")
+    model = Mock(ckpt_path=str(weights))
+    monkeypatch.setattr(ultralytics, "YOLO", lambda _: model)
+    monkeypatch.setattr(evaluation.importlib.metadata, "version", lambda _: "fixture")
+    frames = frames_for(101)
+    monkeypatch.setattr(evaluation, "iter_clip_frames", lambda _: (f for f in frames))
+    monkeypatch.setattr(pipeline, "_run_yolo",
+                        lambda model, frame: tracks_at(steady(int(frame[0, 0, 0]) / 25)))
+    clip = evaluation.Clip(clip_id="timed", group_id="timed", split="test",
+                           source=str(tmp_path), fps=25, labels=[None] * 101, clip_label=1)
+    manifest = evaluation.Manifest(version=1, dataset="synthetic", source_url="https://example.com",
+                                   terms="Unit fixture", clips=[clip])
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest.model_dump_json())
+    output = tmp_path / "evaluation"
+    result = evaluation.evaluate(path, output, experimental_constant_fps=experimental)
+    assert result["status"] == "complete"
+    assert result["clips"][0]["peak_score"] == (0 if experimental else 0.125)
+    provenance = json.loads((output / "summary.json").read_text())["provenance"]
+    if experimental:
+        assert provenance["scorer_timebase"] == "experimental_constant_fps"
+        assert "nominal" in provenance["limitations"][2]
+    else:
+        assert "scorer_timebase" not in provenance
+        assert "not FPS-normalized" in provenance["limitations"][2]
+
+
+def test_cli_flag_requires_a_supplied_rate(fake_components):
+    pipeline, _ = fake_components
+    assert pipeline._build_parser().parse_args([]).experimental_scorer_source_fps is None
+    args = pipeline._build_parser().parse_args(["--experimental-scorer-source-fps", "25"])
+    assert args.experimental_scorer_source_fps == 25
+    with pytest.raises(SystemExit):
+        pipeline._build_parser().parse_args(["--experimental-scorer-source-fps"])

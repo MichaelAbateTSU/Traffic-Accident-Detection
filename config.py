@@ -36,7 +36,8 @@ IOU_THRESHOLD = 0.45
 # History / rolling time window
 # ---------------------------------------------------------------------------
 # Legacy reference rate for fixed frame-unit settings, not a measured timebase.
-# Source FPS is currently not passed to the scorer by any entry point.
+# Default scoring ignores source FPS. The experimental timebase requires an
+# explicit trusted constant rate and does not change these reference settings.
 ASSUMED_FPS = 10
 
 # How many seconds of track history to keep per vehicle

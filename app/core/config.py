@@ -58,6 +58,17 @@ class Settings(BaseSettings):
         default="yolo11x.pt",
         description="YOLO model weights file. Auto-downloaded by Ultralytics on first use.",
     )
+    experimental_scorer_source_fps: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+        description="Opt-in trusted constant source FPS for every admitted job; not capture-reported FPS.",
+    )
+
+    @field_validator("experimental_scorer_source_fps", mode="before")
+    @classmethod
+    def validate_scorer_fps(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Experimental scorer FPS cannot be a boolean")
+        return value
 
     # ------------------------------------------------------------------
     # Job store
