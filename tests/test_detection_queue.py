@@ -832,3 +832,83 @@ def test_deferred_cancelled_pending_failure_cannot_start_inference(queued_client
     finally:
         blocker.rollback()
         blocker.close()
+
+
+def test_multiple_terminal_intents_do_not_multiply_read_blocking_under_writer_lock(queued_client, monkeypatch):
+    client, store, _, _, _ = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    original, _, _ = store.create_submission(
+        headers["Idempotency-Key"], SOURCES[0], max_frames=5, save_frames=False, capacity=10,
+    )
+    jobs = [original] + [store.create(source) for source in SOURCES[1:6]]
+    with store._lock:
+        for job in jobs:
+            store._terminal_recovery[job.job_id] = ("Stopped worker", datetime.now(timezone.utc))
+    store._db.execute("PRAGMA busy_timeout=100")
+    blocker = sqlite3.connect(store._db.execute("PRAGMA database_list").fetchone()[2])
+    blocker.execute("BEGIN IMMEDIATE")
+    entered = threading.Event()
+    recover = store._recover_terminal_locked
+    def observe(jid):
+        entered.set()
+        return recover(jid)
+    monkeypatch.setattr(store, "_recover_terminal_locked", observe)
+    def cycle():
+        try:
+            store._reap_expired()
+        except sqlite3.OperationalError:
+            pass
+    thread = threading.Thread(target=cycle)
+    try:
+        thread.start()
+        assert entered.wait(2)
+        start = time.monotonic()
+        response = client.get("/detection-submissions/v1", headers=headers)
+        latency = time.monotonic() - start
+        assert response.status_code == 200 and response.json()["status"] == "pending"
+        assert latency < 0.15, f"Read blocked {latency:.3f}s behind six recovery writes"
+        start = time.monotonic()
+        poll = client.get(f"/jobs/{original.job_id}")
+        job_latency = time.monotonic() - start
+        assert poll.status_code == 200 and job_latency < 0.15
+        thread.join(2)
+        assert not thread.is_alive()
+        assert len(store._terminal_recovery) == len(jobs)
+        assert store._db.execute("PRAGMA busy_timeout").fetchone()[0] == 100
+        blocker.rollback()
+        store._reap_expired()
+        assert not store._terminal_recovery
+        assert all(store.get(job.job_id).status == "failed" for job in jobs)
+        print(f"Concurrent reconciliation latency: {latency:.4f}s; job GET: {job_latency:.4f}s")
+    finally:
+        blocker.rollback()
+        blocker.close()
+        thread.join(2)
+
+
+def test_shutdown_failure_transitions_do_not_stack_busy_waits(queued_client, monkeypatch):
+    client, store, started, release, observed = queued_client
+    jobs = [submit(client, source) for source in SOURCES[:6]]
+    assert started.wait(2)
+    store._db.execute("PRAGMA busy_timeout=100")
+    blocker = sqlite3.connect(store._db.execute("PRAGMA database_list").fetchone()[2])
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        start = time.monotonic()
+        client.app.state.detection_queue.close()
+        latency = time.monotonic() - start
+        assert latency < 0.15, f"Shutdown blocked {latency:.3f}s behind five failure writes"
+        assert len(store._terminal_recovery) == 5
+        assert store.get(jobs[0]).status == "running"
+        assert all(store.get(jid).status == "pending" for jid in jobs[1:])
+        assert store._db.execute("PRAGMA busy_timeout").fetchone()[0] == 100
+        blocker.rollback()
+        store._reap_expired()
+        assert all(store.get(jid).status == "failed" for jid in jobs[1:])
+        release.set()
+        wait_for(lambda: store.get(jobs[0]).status == "complete")
+        assert observed["order"] == jobs[:1]
+        print(f"Shutdown recovery registration latency: {latency:.4f}s")
+    finally:
+        blocker.rollback()
+        blocker.close()

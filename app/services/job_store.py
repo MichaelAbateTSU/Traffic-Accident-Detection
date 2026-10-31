@@ -16,6 +16,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 from urllib.parse import urlparse
@@ -392,7 +393,7 @@ class JobStore:
 
     def fail_job(self, job_id: str, error: str) -> bool:
         """Record a known stopped/rejected job; never infer failure from age."""
-        with self._lock:
+        with self._lock, self._nonblocking_maintenance_locked():
             job = self._jobs.get(job_id)
             if job is None or job.status in ("complete", "failed"):
                 self._terminal_recovery.pop(job_id, None)
@@ -400,6 +401,20 @@ class JobStore:
             # At most one intent per retained nonterminal job, bounded by admission.
             self._terminal_recovery.setdefault(job_id, (error, _utcnow()))
             return self._recover_terminal_locked(job_id)
+
+    @contextmanager
+    def _nonblocking_maintenance_locked(self) -> Iterator[None]:
+        if self._db is None:
+            yield
+            return
+        # The store lock serializes connection use, including timeout changes.
+        # Background/shutdown retries must not stack SQLite's default busy waits.
+        timeout = self._db.execute("PRAGMA busy_timeout").fetchone()[0]
+        self._db.execute("PRAGMA busy_timeout=0")
+        try:
+            yield
+        finally:
+            self._db.execute(f"PRAGMA busy_timeout={int(timeout)}")
 
     def has_terminal_recovery(self, job_id: str) -> bool:
         with self._lock:
@@ -674,7 +689,7 @@ class JobStore:
 
     def _reap_expired(self) -> None:
         now = _utcnow().timestamp()
-        with self._lock:
+        with self._lock, self._nonblocking_maintenance_locked():
             for job_id in list(self._terminal_recovery):
                 self._recover_terminal_locked(job_id)
             self._reap_receipts_locked(datetime.fromtimestamp(now, tz=timezone.utc))

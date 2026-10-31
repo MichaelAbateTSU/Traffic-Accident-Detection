@@ -345,7 +345,14 @@ affected retained job. The existing reaper retries those writes at its normal
 60-second cadence, logging each failure with the job ID and traceback; it never
 resubmits inference. The registry is bounded by retained nonterminal jobs, and
 attempts use SQLite's finite connection timeout rather than an indefinite
-event-loop retry. No replacement thread is spawned per failed job. Persistent
+event-loop retry for normal request writes. Maintenance and known-failure
+transitions temporarily use a zero SQLite busy timeout while holding the store
+lock, then restore the connection setting even on errors. Thus a contended
+writer cannot stack one busy wait per recovery intent, receipt write, or
+shutdown failure transition. Failed attempts remain logged and pending for the
+next scheduled cycle. This bounds SQLite contention waits, not filesystem I/O,
+fsync, artifact removal or logging latency; it is not a hard HTTP latency SLA.
+No replacement thread is spawned per failed job. Persistent
 storage faults remain visible in logs and may hold admission capacity until
 recovery. Polling/replay reports the last persisted `pending`/`running` state,
 not a falsely durable `failed` state, until the write commits. Admission failure
