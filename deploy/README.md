@@ -12,7 +12,7 @@ change that. Supply an authorized existing free VM, its SSH access and a DNS nam
 before deploying. An account may exist elsewhere; absent configuration is not
 evidence that the user has no account.
 
-Verified on this workspace's **amd64** Docker host: 157 tests with the real
+Verified on this workspace's **amd64** Docker host: 198 combined evaluator/hosting tests with the real
 locked ML dependencies, certificate-verified HTTPS inference over the isolated
 proxy, authenticated JPEG retrieval, private/metadata egress rejection, and
 preserved results/images after API restart and recreation, including a

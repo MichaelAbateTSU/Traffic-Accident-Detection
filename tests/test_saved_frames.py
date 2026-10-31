@@ -124,6 +124,41 @@ def frame_pipeline(client, monkeypatch, tmp_path):
     return client, tmp_path, tracker, detector, overlay, saver
 
 
+@pytest.mark.parametrize("max_frames", [None, 1, 40, 120, 300])
+def test_requested_temporal_frame_budget_reaches_worker(frame_pipeline, monkeypatch, max_frames):
+    client, _, _, detector, _, _ = frame_pipeline
+    monkeypatch.setattr(client.app.state, "model", object())
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    monkeypatch.setattr(detection_service, "_iter_video", lambda _: iter([frame] * 400))
+    loop = client.portal.call(asyncio.get_running_loop)
+
+    def run_inline(executor, worker, *args):
+        worker(*args)
+        future = loop.create_future()
+        future.set_result(None)
+        return future
+
+    monkeypatch.setattr(loop, "run_in_executor", run_inline)
+    body = {"stream_url": "https://cams.example.com/cam-a.m3u8"}
+    if max_frames is not None:
+        body["max_frames"] = max_frames
+    response = client.post("/detect-accident", json=body)
+    assert response.status_code == 202
+    result = client.get(f"/jobs/{response.json()['job_id']}").json()
+    expected = 5 if max_frames is None else max_frames
+    assert result["max_frames"] == result["frames_processed"] == expected
+    assert detector.call_count == expected
+
+
+@pytest.mark.parametrize("max_frames", [0, -1, 301, 18000, True, 3.5, "40"])
+def test_api_rejects_invalid_or_unbounded_frame_budgets(client, max_frames):
+    response = client.post("/detect-accident", json={
+        "stream_url": "https://cams.example.com/cam-a.m3u8", "max_frames": max_frames,
+    })
+    assert response.status_code == 422
+    assert job_store.all_jobs() == []
+
+
 @pytest.mark.parametrize("save_frames", [False, True, None])
 def test_detection_request_passes_image_preference_to_worker(frame_pipeline, monkeypatch, save_frames):
     client, output, _, _, _, saver = frame_pipeline
