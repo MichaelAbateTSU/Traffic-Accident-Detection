@@ -4,7 +4,7 @@ app/api/detect.py — Detection endpoints.
 Routes
 ------
 POST /detect-accident
-    Body : DetectRequest  { stream_url, save_frames }
+    Body : DetectRequest  { stream_url, max_frames, save_frames }
     Returns 202 JobAccepted { job_id, status, message }
 
 GET /jobs/{job_id}
@@ -26,7 +26,6 @@ from app.services.job_store import job_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["detection"])
-JOB_MAX_FRAMES = 5
 
 
 def _base_origin(request: Request) -> str:
@@ -93,7 +92,7 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
         )
 
     stream_url = str(body.stream_url)
-    max_frames = JOB_MAX_FRAMES
+    max_frames = body.max_frames
     job = job_store.create(stream_url, max_frames=max_frames, save_frames=body.save_frames)
 
     logger.info(

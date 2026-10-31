@@ -50,11 +50,14 @@ _install_stub("deep_sort_realtime.deepsort_tracker", DeepSort=_StubDeepSort)
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.main import app
     from app.services.job_store import job_store
+
+    # HTTP tests must not download/reload weights even when ML is installed.
+    monkeypatch.setattr("ultralytics.YOLO", _UnavailableYOLO)
 
     with job_store._lock:
         job_store._jobs.clear()
