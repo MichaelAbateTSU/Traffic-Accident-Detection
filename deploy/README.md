@@ -59,10 +59,10 @@ was provisioned, and no public deployment is implied by this assessment.
 The static frontend is hosted at
 `https://traffic-accident-detection-frontend.onrender.com`; this does not mean
 an inference backend is live or that the frontend can run remote detection yet.
-Render's official pages, independently refreshed by the coordinator on 2026-10-31
+As of 2026-10-31, Render's official pages
 ([Free instances](https://render.com/docs/free),
 [compute plans](https://render.com/docs/compute-plans) and
-[disks](https://render.com/docs/disks)), state the following:
+[disks](https://render.com/docs/disks)) state the following:
 
 - Render explicitly says **not to use Free instances for production**.
 - A free web service **spins down after 15 minutes without inbound traffic**, and
@@ -75,10 +75,7 @@ Render's official pages, independently refreshed by the coordinator on 2026-10-3
 - Persistent disks require a paid service; Free Postgres expires after 30 days and
   Free Key Value does not persist across restarts.
 
-The remote implementation session that authored this section could not itself reach
-`render.com` (DNS resolution failed), so it did not fetch these pages; the limits above
-come from the coordinator's refresh. Recheck the provider's current limits before any
-purchase.
+Provider limits change; recheck the linked pages before any purchase.
 
 On 2026-10-31, the locked **amd64** production image was tested locally with
 `--cpus 0.1 --memory 512m --memory-swap 512m` (no swap), retaining YOLO11n,
