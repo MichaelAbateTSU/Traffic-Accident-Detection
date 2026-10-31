@@ -28,6 +28,7 @@ import logging
 from itertools import islice
 import os
 import shutil
+import math
 import time
 import uuid
 from datetime import datetime, timezone
@@ -174,6 +175,29 @@ def _prune_old_job_artifacts() -> None:
 # Core detection function (runs synchronously in a thread pool)
 # ---------------------------------------------------------------------------
 
+def _clip_event_region(region, width: int, height: int) -> list[float] | None:
+    """
+    Clip a tracker-space [x1, y1, x2, y2] region to the processed frame.
+
+    Tracker/Kalman boxes may extend past the image edges. Exposed event boxes
+    are the visible part only; a region with no visible area (or non-finite
+    values) is reported as None. The scorer's own region is left untouched.
+    """
+    if not region:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in region)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+        return None
+    x1, x2 = max(0.0, min(x1, x2)), min(float(width), max(x1, x2))
+    y1, y2 = max(0.0, min(y1, y2)), min(float(height), max(y1, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
 def run_detection_job(
     job_id: str,
     stream_url: str,
@@ -280,8 +304,7 @@ def run_detection_job(
                 peak_confidence = score
 
             if detected:
-                event_region = meta.get("event_region")
-                bbox = list(event_region) if event_region else None
+                bbox = _clip_event_region(meta.get("event_region"), frame.shape[1], frame.shape[0])
 
                 events.append(DetectionEvent(
                     frame_idx=frames_processed,
