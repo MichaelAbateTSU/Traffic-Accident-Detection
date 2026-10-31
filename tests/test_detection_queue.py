@@ -434,6 +434,42 @@ def test_durable_storage_required_is_http_visible_but_keyless_remains_available(
     assert not memory.all_jobs()
 
 
+@pytest.mark.parametrize("path", [
+    ":memory:", "file::memory:", "file::memory:?cache=shared",
+    "file:submission-http-test?mode=memory&cache=shared", "",
+])
+def test_volatile_sqlite_http_rejects_keyed_post_and_lookup_after_recreation(queued_client, monkeypatch, path):
+    import app.api.detect as detect_module
+    client, _, _, _, observed = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    for _ in range(2):
+        volatile = JobStore(database_path=path, start_reaper=False)
+        try:
+            with monkeypatch.context() as configured:
+                configured.setattr(settings, "job_database_path", path)
+                configured.setattr(detect_module, "job_store", volatile)
+                schedule = Mock()
+                configured.setattr(client.app.state.detection_queue, "submit", schedule)
+                for response in (
+                    client.post("/detection-submissions/v1", json=body, headers=headers),
+                    client.get("/detection-submissions/v1", headers=headers),
+                ):
+                    assert response.status_code == 503
+                    assert response.json()["detail"]["code"] == "idempotency_unavailable"
+                assert not volatile.all_jobs() and not volatile._submission_receipts
+                schedule.assert_not_called()
+                assert not observed["order"]
+                # Existing keyless clients may still intentionally use volatile storage.
+                keyless = client.post("/detect-accident", json=body)
+                assert keyless.status_code == 202 and len(volatile.all_jobs()) == 1
+                schedule.assert_called_once()
+                assert not volatile._submission_receipts
+        finally:
+            if volatile._db is not None:
+                volatile._db.close()
+
+
 def test_removed_result_http_response_cannot_enqueue(queued_client):
     client, store, started, release, observed = queued_client
     headers = {"Idempotency-Key": submission_key()}
@@ -494,6 +530,7 @@ def test_key_only_lookup_is_read_only_private_and_not_an_admission_fence(queued_
     headers = {"Idempotency-Key": submission_key()}
     unknown = client.get("/detection-submissions/v1", headers=headers)
     assert unknown.status_code == 404
+    assert unknown.headers["cache-control"] == "no-store"
     assert unknown.json()["detail"]["code"] == "idempotency_key_unknown"
     assert "delayed POST" in unknown.json()["detail"]["message"]
     assert not store.all_jobs() and not store._submission_receipts
@@ -503,12 +540,14 @@ def test_key_only_lookup_is_read_only_private_and_not_an_admission_fence(queued_
     monkeypatch.setitem(client.app.state._state, "model", None)
     lookup = client.get("/detection-submissions/v1", headers=headers)
     assert lookup.status_code == 200 and lookup.json()["replayed"] is True
+    assert lookup.headers["cache-control"] == "no-store"
     assert lookup.json()["job_id"] == original.json()["job_id"]
     assert lookup.json()["status"] == "running"
     assert "stream_url" not in lookup.json() and SOURCES[0] not in lookup.text
     assert "max_frames" not in lookup.json() and len(observed["order"]) == 1
     client.headers.pop("Authorization")
-    assert client.get("/detection-submissions/v1", headers=headers).status_code == 401
+    denied = client.get("/detection-submissions/v1", headers=headers)
+    assert denied.status_code == 401 and denied.headers["cache-control"] == "no-store"
 
 
 def test_key_only_lookup_reports_expired_or_removed_result_without_work(queued_client):
@@ -525,12 +564,49 @@ def test_key_only_lookup_reports_expired_or_removed_result_without_work(queued_c
         store._delete_job(jid)
     gone = client.get("/detection-submissions/v1", headers=headers)
     assert gone.status_code == 410 and gone.json()["detail"]["code"] == "idempotency_result_expired"
+    assert gone.headers["cache-control"] == "no-store"
     expired = client.get("/detection-submissions/v1", headers={
         "Idempotency-Key": f"v1.{int(time.time()) - 86401}.{uuid.uuid4()}",
     })
     assert expired.status_code == 410 and expired.json()["detail"]["code"] == "idempotency_key_expired"
-    assert client.get("/detection-submissions/v1").status_code == 422
+    assert expired.headers["cache-control"] == "no-store"
+    missing = client.get("/detection-submissions/v1")
+    assert missing.status_code == 422 and missing.headers["cache-control"] == "no-store"
     assert not store.all_jobs() and observed["order"] == [jid]
+
+
+@pytest.mark.parametrize("key", ["bad-key", "x" * 51, ""])
+def test_invalid_key_lookup_errors_are_not_cacheable(queued_client, key):
+    client, _, _, _, _ = queued_client
+    invalid = client.get("/detection-submissions/v1", headers={"Idempotency-Key": key})
+    assert invalid.status_code == 422 and invalid.headers["cache-control"] == "no-store"
+
+
+def test_volatile_and_internal_lookup_errors_are_not_cacheable(queued_client, monkeypatch):
+    import app.api.detect as detect_module
+    client, store, _, _, _ = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(detect_module, "job_store", JobStore(start_reaper=False))
+        response = client.get("/detection-submissions/v1", headers=headers)
+        assert response.status_code == 503 and response.headers["cache-control"] == "no-store"
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    monkeypatch.setattr(store, "find_submission", Mock(side_effect=RuntimeError("Read failed")))
+    response = client.get("/detection-submissions/v1", headers=headers)
+    assert response.status_code == 500 and response.headers["cache-control"] == "no-store"
+
+
+def test_prefixed_lookup_also_sets_no_store(queued_client, monkeypatch):
+    from app.main import create_app
+    monkeypatch.setattr(settings, "api_prefix", "/api/v1")
+    prefixed = TestClient(create_app())
+    response = prefixed.get("/api/v1/detection-submissions/v1", headers={
+        "Authorization": f"Bearer {TOKEN}", "Idempotency-Key": submission_key(),
+    })
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "idempotency_key_unknown"
+    assert response.headers["cache-control"] == "no-store"
+    prefixed.close()
 
 
 def test_storage_write_failure_is_visible_and_never_schedules(queued_client, monkeypatch):

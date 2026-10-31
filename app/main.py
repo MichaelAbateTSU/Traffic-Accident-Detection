@@ -39,6 +39,12 @@ from app.api import cameras, dashboard, detect, health, incidents, jobs, stats
 logger = logging.getLogger(__name__)
 
 
+def _submission_lookup_headers(request: Request) -> dict[str, str]:
+    if request.method == "GET" and request.url.path == f"{settings.api_prefix}/detection-submissions/v1":
+        return {"Cache-Control": "no-store"}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Lifespan — runs once at startup / shutdown
 # ---------------------------------------------------------------------------
@@ -133,6 +139,7 @@ def create_app() -> FastAPI:
     async def log_requests(request: Request, call_next):
         logger.info("→ %s %s", request.method, request.url.path)
         response = await call_next(request)
+        response.headers.update(_submission_lookup_headers(request))
         logger.info("← %s %s  %d", request.method, request.url.path, response.status_code)
         return response
 
@@ -145,6 +152,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={"detail": "An internal server error occurred."},
+            headers=_submission_lookup_headers(request),
         )
 
     # ------------------------------------------------------------------

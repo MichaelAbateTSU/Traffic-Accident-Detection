@@ -317,10 +317,14 @@ class JobStore:
             return job, False, expires_at
 
     def _require_submission_storage(self) -> None:
-        if self._db is None:
+        if self._db is None or not any(
+            name == "main" and filename
+            for _, name, filename in self._db.execute("PRAGMA database_list")
+        ):
             raise SubmissionIdentityError(
                 503, "idempotency_unavailable",
-                "Keyed submissions require a persistent JOB_DATABASE_PATH.",
+                "Keyed submissions require a file-backed JOB_DATABASE_PATH on persistent storage; "
+                "in-memory and temporary SQLite databases are unsupported.",
             )
 
     def _reap_receipts_locked(self, now: datetime) -> None:

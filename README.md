@@ -216,6 +216,13 @@ separate job. This backend rejects keys on the old endpoint with 422
 headers, so using a header on that path was never a safe compatibility mechanism.
 Keyed requests require a persistent
 `JOB_DATABASE_PATH`; without it they fail closed with 503, not in-memory deduplication.
+The keyed POST and GET also reject connections whose SQLite main database has
+no filename, including `:memory:`, recognized SQLite memory URI forms and
+temporary databases, with `idempotency_unavailable`. Keyless behavior is unchanged.
+Checking a file-backed connection does **not** establish filesystem durability:
+operators must provide a persistent mounted volume, not an ephemeral filesystem,
+and keep the same database across restarts. A nonempty production configuration
+value alone is not evidence of durable storage.
 Existing bearer authentication and the current exact production source allowlist
 apply to **every** POST, including reconciliation. CORS permits this one additional
 header for the configured origins; it does not grant unauthenticated access.
@@ -274,7 +281,11 @@ is retained. A 200 replay is not a promise that inference succeeded; inspect `st
 requires the same header but no body or URL. It is read-only and returns the
 same 200 replay state (`job_id`, current `status`, `error`, expiry and artifact
 base), never the camera URL or detection parameters. It remains available when
-the model/queue is unavailable. Like the existing job GET, it requires operator
+the model/queue is unavailable. The API sets `Cache-Control: no-store` on every
+lookup response, including authentication, validation and server errors:
+the URL is shared across identities, and an unknown receipt may appear later.
+Clients and proxies must not cache lookups or reuse one identity's response for
+another. Like the existing job GET, it requires operator
 authentication, not a new source approval check; each POST still revalidates
 the current allowlist. Keys or results that expired produce the same 410
 codes. Missing/invalid headers produce 422; missing durable storage produces 503.

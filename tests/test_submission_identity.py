@@ -147,6 +147,54 @@ def test_in_memory_mode_fails_closed_for_keyed_clients():
     assert store.create(SOURCE).status == "pending"
 
 
+@pytest.mark.parametrize("path", [
+    ":memory:", "file::memory:", "file::memory:?cache=shared",
+    "file:submission-test?mode=memory&cache=shared", "",
+])
+def test_volatile_sqlite_rejects_all_keyed_operations_before_and_after_recreation(path):
+    key = key_at(datetime.now(timezone.utc))
+    for _ in range(2):
+        store = JobStore(database_path=path, start_reaper=False)
+        try:
+            if store._db is not None:
+                assert store._db.execute("PRAGMA database_list").fetchone()[2] == ""
+            for attempt in (
+                lambda: create(store, key),
+                lambda: store.lookup_submission(key, SOURCE, 5, False),
+                lambda: store.find_submission(key),
+            ):
+                with pytest.raises(SubmissionIdentityError) as error:
+                    attempt()
+                assert error.value.status_code == 503
+                assert error.value.code == "idempotency_unavailable"
+                assert not store.all_jobs() and not store._submission_receipts
+            assert store.create(SOURCE).status == "pending"
+        finally:
+            if store._db is not None:
+                store._db.close()
+
+
+def test_sqlite_temporary_database_connection_rejects_keyed_operations():
+    # An empty path normally selects JobStore's keyless in-memory mode.
+    # Exercise SQLite's separate temporary main database behavior as well.
+    store = JobStore(start_reaper=False)
+    store._db = sqlite3.connect("")
+    try:
+        assert store._db.execute("PRAGMA database_list").fetchone()[2] == ""
+        key = key_at(datetime.now(timezone.utc))
+        for attempt in (
+            lambda: create(store, key),
+            lambda: store.lookup_submission(key, SOURCE, 5, False),
+            lambda: store.find_submission(key),
+        ):
+            with pytest.raises(SubmissionIdentityError) as error:
+                attempt()
+            assert error.value.code == "idempotency_unavailable"
+        assert not store.all_jobs() and not store._submission_receipts
+    finally:
+        store._db.close()
+
+
 def test_receipts_store_hashes_not_raw_keys_or_camera_urls(store):
     key = key_at(datetime.now(timezone.utc))
     create(store, key)
