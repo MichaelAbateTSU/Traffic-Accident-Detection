@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     max_frame_dimension: int = Field(default=1280, ge=64, le=3840)
     max_retained_jobs: int = Field(default=100, ge=1, le=10000)
     inference_threads: int = Field(default=2, ge=1, le=16)
+    deepsort_embedder_batch_size: int = Field(default=16, ge=1, le=16)
 
     # ------------------------------------------------------------------
     # YOLO / pipeline
@@ -90,6 +91,13 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
+    @field_validator("deepsort_embedder_batch_size", mode="before")
+    @classmethod
+    def _validate_embedder_batch(cls, value):
+        if isinstance(value, (bool, float)):
+            raise ValueError("DEEPSORT_EMBEDDER_BATCH_SIZE must be an integer from 1 to 16")
+        return value
+
     @field_validator("cors_origins")
     @classmethod
     def _parse_origins(cls, v: str) -> str:
