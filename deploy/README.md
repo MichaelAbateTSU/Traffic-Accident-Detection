@@ -59,14 +59,23 @@ was provisioned, and no public deployment is implied by this assessment.
 The static frontend is hosted at
 `https://traffic-accident-detection-frontend.onrender.com`; this does not mean
 an inference backend is live or that the frontend can run remote detection yet.
-[Render's compute plans](https://render.com/docs/compute-plans) specify
-0.1 CPU / 512 MB for free web services.
-[Render's Free documentation](https://render.com/docs/free) describes idle
-spin-down after 15 minutes, ephemeral local files, no free persistent disks,
-and Free Postgres expiry after 30 days.
-These limits were supplied from an official-document review; this workspace
-could not independently refresh that page because `render.com` DNS resolution
-failed. Recheck the provider's current limits before making any purchase.
+As of 2026-10-31, Render's official pages
+([Free instances](https://render.com/docs/free),
+[compute plans](https://render.com/docs/compute-plans) and
+[disks](https://render.com/docs/disks)) state the following:
+
+- Render explicitly says **not to use Free instances for production**.
+- A free web service **spins down after 15 minutes without inbound traffic**, and
+  local filesystem changes (including SQLite and saved images) are lost on
+  spin-down as well as on restarts and redeploys.
+- Free web services get 0.1 CPU / 512 MB.
+- 750 free instance hours per workspace per month are granted. Bandwidth and
+  pipeline overages can be billed if a payment method exists, or lead to
+  suspension/build disablement otherwise.
+- Persistent disks require a paid service; Free Postgres expires after 30 days and
+  Free Key Value does not persist across restarts.
+
+Provider limits change; recheck the linked pages before any purchase.
 
 On 2026-10-31, the locked **amd64** production image was tested locally with
 `--cpus 0.1 --memory 512m --memory-swap 512m` (no swap), retaining YOLO11n,
@@ -188,9 +197,9 @@ docker rm traffic-render-limit-check
 There are additional independent blockers even if memory were sufficient:
 
 - **Durability:** `/data/jobs.sqlite3` and saved frames require persistent
-  storage. Render's ephemeral filesystem loses them on replacement/redeploy,
+  storage. Render's ephemeral filesystem loses them on spin-down, restart and redeploy,
   preventing accepted-job restart recovery and breaking protected image links.
-  A 30-day Free Postgres database is not a durable replacement, and changing
+  A 30-day Free Postgres database (or non-persistent Free Key Value) is not a durable replacement, and changing
   database engines would not preserve the images. Remote database/object
   storage would need authorization, bounded quotas, expiry/retention and
   validated failure/recovery behavior.
