@@ -108,6 +108,14 @@ the original behavior. Invalid settings fail validation rather than silently
 falling back. This is a useful **forward-batch control**, not a Render deployment
 configuration or a hard process-memory guarantee.
 
+An isolated comparison with identical experimental one-thread/allocator/
+inference-mode/oneDNN reductions and **19 varied crops** measured batch 2
+completing two successive embedder calls by 49.7 seconds including startup,
+with terminal cgroup high-water **294,174,720 bytes** (about 280.5 MiB).
+Batch 16 completed its first call at 44.9 seconds, high-water 464,355,328 bytes,
+but was OOM-killed during the second call. This establishes a forward-batching
+memory benefit on that fixture, not a bound for the combined YOLO/API process.
+
 The pinned `deep_sort_realtime==1.3.2` constructs its MobileNet embedder with
 16, then exposes `max_batch_size` as a mutable inference limit. Its `predict`
 method **preprocesses every supplied crop before splitting model forwards**.
