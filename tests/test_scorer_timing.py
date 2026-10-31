@@ -33,6 +33,23 @@ def tracks_at(positions):
 
 
 @pytest.mark.parametrize("experimental", [False, True])
+@pytest.mark.parametrize("offset,expected", [(9, 0.5), (9.0001, 0)])
+def test_projected_overlap_threshold_is_inclusive(experimental, offset, expected):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    def boxes(distance):
+        return [
+            SimpleNamespace(track_id=tid, to_tlbr=lambda x=x: [x, 0, x + 11, 10])
+            for tid, x in [(1, 0), (2, distance)]
+        ]
+    scorer.update(boxes(20), 0)
+    # At offset 9: intersection=20, union=200, IoU=0.1 exactly.
+    _, _, meta = scorer.update(boxes(offset), 1)
+    assert meta["signal_values"]["collision_iou"] == expected
+    assert bool(scorer._collision_events) == bool(expected)
+
+
+@pytest.mark.parametrize("experimental", [False, True])
 def test_stop_signal_requires_low_speed_history_not_a_moving_to_stopped_transition(experimental):
     scorer, rows = sample(lambda _: [(0, 0)], 10, seconds=0.5, experimental=experimental)
     assert all(snap.speed == 0 for snap in scorer._records[1].history)

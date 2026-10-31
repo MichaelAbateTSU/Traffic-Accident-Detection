@@ -372,8 +372,7 @@ class AccidentScorer:
         count; experimental mode requires current uninterrupted reference time.
         """
         stopped_count = sum(self._contributes_sudden_stop(rec) for rec in self._records.values())
-        # Normalise: 1 stopped vehicle out of N = partial signal
-        # Full signal (1.0) when ≥2 vehicles are stopped simultaneously
+        # One qualifying history gives 0.5; two or more give 1, regardless of total tracks.
         return min(1.0, stopped_count / 2.0)
 
     def _contributes_sudden_stop(self, rec: _TrackRecord) -> bool:
@@ -431,7 +430,7 @@ class AccidentScorer:
         Image-space overlap/convergence does not verify physical contact.
 
         A pair qualifies when:
-          - current IoU > COLLISION_IOU_THRESHOLD
+          - current IoU >= COLLISION_IOU_THRESHOLD
           - centres were converging in recent frames
         """
         iou_threshold = config.COLLISION_IOU_THRESHOLD
