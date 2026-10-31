@@ -472,7 +472,12 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
         "limitations": [
             "COCO YOLO detects vehicles, not accident classes.",
             "Thresholds are fixed from config; no fitting or calibration on evaluation labels.",
-            "Kinematics and most temporal thresholds use pixels/frame, not FPS-normalized units.",
+            (
+                "Experimental scorer trusts manifest constant FPS; nominal decoder FPS is not verified timing. "
+                "VFR/dropped frames and DeepSORT observation-based timing remain unsupported limitations."
+                if experimental_constant_fps
+                else "Kinematics and most temporal thresholds use pixels/frame, not FPS-normalized units."
+            ),
             "Small selected clips are a smoke evaluation, not an accuracy benchmark.",
             "Normal pre-event segments are not independent normal-driving videos.",
             "Unknown labels exclude frame observations and make continuous temporal metrics unavailable.",
@@ -484,10 +489,6 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
     }
     if experimental_constant_fps:
         provenance["scorer_timebase"] = "experimental_constant_fps"
-        provenance["limitations"][2] = (
-            "Experimental scorer trusts manifest constant FPS; nominal decoder FPS is not verified timing. "
-            "VFR/dropped frames and DeepSORT observation-based timing remain unsupported limitations."
-        )
     # Partial output is explicitly marked running/failed, never a completed result.
     report_path = output / "summary.json"
     report = {"status": "running", "provenance": provenance, "clips": []}

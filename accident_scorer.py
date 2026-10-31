@@ -234,7 +234,7 @@ class AccidentScorer:
     def _ema_alpha(self, alpha: float, elapsed: float) -> float:
         if not self._experimental or elapsed == 1:
             return alpha
-        return 1 - (1 - alpha) ** elapsed
+        return -math.expm1(elapsed * math.log1p(-alpha))
 
     def _recent(self, rec: _TrackRecord, frames: int) -> list[TrackSnapshot]:
         history = list(rec.history)
@@ -452,10 +452,7 @@ class AccidentScorer:
 
                 snap_a = rec_a.history[-1]
                 snap_b = rec_b.history[-1]
-                if self._experimental and (
-                    abs(snap_a.frame_idx - frame_idx) > 1e-9
-                    or abs(snap_b.frame_idx - frame_idx) > 1e-9
-                ):
+                if not self._observed_now(rec_a) or not self._observed_now(rec_b):
                     continue
 
                 iou = _compute_iou(
@@ -555,7 +552,7 @@ class AccidentScorer:
                 if len(rec.history) < 3:
                     continue
                 if self._experimental and (
-                    abs(rec.last_seen_frame - frame_idx) > 1e-9
+                    not self._observed_now(rec)
                     or not self._has_duration(list(rec.history), 3)
                 ):
                     continue
