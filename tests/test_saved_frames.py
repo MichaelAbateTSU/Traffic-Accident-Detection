@@ -168,3 +168,101 @@ def test_unsaved_job_keeps_previous_saved_artifacts(frame_pipeline, monkeypatch,
     detection_service.run_detection_job(last.job_id, stream_url, 2, object(), save_frames=True)
     assert old_path.read_bytes() == original
     assert client.get("/cameras/R2_061/latest-frame").json()["data"]["job_id"] == last.job_id
+
+
+@pytest.mark.parametrize("stage", ["tracker", "scorer", "open", "fps", "read", "inference", "release"])
+def test_worker_failures_record_terminal_status_and_release_capture(frame_pipeline, monkeypatch, caplog, stage):
+    client, _, _, detector, _, _ = frame_pipeline
+    cap = detection_service._open_video.return_value
+    error = RuntimeError(f"Failure in {stage}")
+    if stage in ("tracker", "scorer"):
+        monkeypatch.setattr(detection_service, "DeepSortTracker" if stage == "tracker" else "AccidentScorer",
+                            Mock(side_effect=error))
+    elif stage == "open":
+        detection_service._open_video.side_effect = error
+    elif stage == "fps":
+        cap.get.side_effect = error
+    elif stage == "read":
+        monkeypatch.setattr(detection_service, "_iter_video", Mock(side_effect=error))
+    elif stage == "inference":
+        detector.side_effect = error
+    else:
+        cap.release.side_effect = error
+    job = job_store.create("https://cams.example.com/cam-a.m3u8", save_frames=False)
+    detection_service.run_detection_job(job.job_id, job.stream_url, 1, object())
+    data = client.get(f"/jobs/{job.job_id}").json()
+    assert data["status"] == "failed"
+    assert data["completed_at"] is not None
+    assert f"Failure in {stage}" in data["error"]
+    assert f"Failure in {stage}" in caplog.text
+    if stage in ("tracker", "scorer", "open"):
+        cap.release.assert_not_called()
+    else:
+        cap.release.assert_called_once()
+
+
+@pytest.mark.parametrize("source_frames", [1, 4])
+def test_real_iterator_capture_release_on_exhaustion_or_frame_limit(frame_pipeline, monkeypatch, source_frames):
+    from pipeline import _iter_video
+
+    _, _, _, detector, _, _ = frame_pipeline
+    cap = detection_service._open_video.return_value
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    cap.read.side_effect = [(True, frame)] * source_frames + [(False, None)]
+    monkeypatch.setattr(detection_service, "_iter_video", _iter_video)
+    job = job_store.create("https://cams.example.com/cam-a.m3u8", save_frames=False)
+    detection_service.run_detection_job(job.job_id, job.stream_url, 2, object())
+    assert job_store.get(job.job_id).status == "complete"
+    assert detector.call_count == min(source_frames, 2)
+    cap.release.assert_called()
+
+
+@pytest.mark.parametrize("published_frames", [0, 1])
+@pytest.mark.parametrize("failed_image", [0, 1, 2])
+@pytest.mark.parametrize("raises", [False, True])
+def test_incomplete_image_writes_fail_without_publishing_or_losing_prior_frames(
+    frame_pipeline, monkeypatch, published_frames, failed_image, raises, caplog,
+):
+    client, output, _, _, _, _ = frame_pipeline
+    stream_url = "https://cams.example.com/cam-a.m3u8"
+    old = job_store.create(stream_url, save_frames=True)
+    detection_service.run_detection_job(old.job_id, stream_url, 1, object(), save_frames=True)
+    old_path = output / old.job_id / "capture" / "000000.jpg"
+    original = old_path.read_bytes()
+    monkeypatch.setattr(detection_service.settings, "job_artifact_retention_count", 2)
+    imwrite = cv2.imwrite
+    calls = 0
+
+    def failing_write(path, image, options):
+        nonlocal calls
+        index = calls
+        calls += 1
+        if index == published_frames * 3 + failed_image:
+            # Simulate a partially written file even when the writer fails.
+            imwrite(path, image, options)
+            if raises:
+                raise OSError("Simulated write exception")
+            return False
+        return imwrite(path, image, options)
+
+    monkeypatch.setattr(cv2, "imwrite", failing_write)
+    job = job_store.create(stream_url, save_frames=True)
+    cap = detection_service._open_video.return_value
+    cap.release.reset_mock()
+    detection_service.run_detection_job(job.job_id, stream_url, 2, object(), save_frames=True)
+    result = job_store.get(job.job_id)
+    assert result.status == "failed" and result.completed_at is not None
+    assert ("Simulated write exception" if raises else "Could not write frame image") in result.error
+    assert "Job failed" in caplog.text
+    assert len(result.frames) == result.frames_processed == published_frames
+    cap.release.assert_called_once()
+    assert old_path.read_bytes() == original
+    if not published_frames:
+        assert not (output / job.job_id).exists()
+    else:
+        assert len(list((output / job.job_id).rglob("*.jpg"))) == 3
+        for kind in ("capture", "capture_annotated", "pipeline_output"):
+            assert client.get(f"/artifacts/{job.job_id}/{kind}/000000.jpg").status_code == 200
+            assert client.get(f"/artifacts/{job.job_id}/{kind}/000001.jpg").status_code == 404
+    latest = client.get("/cameras/cam-a/latest-frame").json()["data"]
+    assert latest["job_id"] == (job.job_id if published_frames else old.job_id)

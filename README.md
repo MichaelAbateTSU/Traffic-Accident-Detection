@@ -672,6 +672,7 @@ The HTTP contract tests stub unavailable ML dependencies, so they run without a 
 
 - `404` for unknown `job_id`, `incident_id`, or a camera with no saved frames.
 - `422` for invalid query parameters (for example `page=0`, `min_confidence=1.2`) or invalid PATCH bodies.
+- Worker initialization, capture/read, inference, and image-write errors are logged and recorded as failed jobs with `error` and `completed_at`. Captures are released on completion, frame-limit exits, and failures. A frame's URLs are published only after all three JPEG writes succeed; failed jobs remove incomplete/unpublished images while retaining previously published frames.
 - Legacy endpoints (`/detect-accident`, `/jobs/{job_id}`, `/health`) retain their original response shapes.
 
 ---
