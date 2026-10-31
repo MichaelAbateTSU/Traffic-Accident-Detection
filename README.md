@@ -1055,6 +1055,20 @@ All detection parameters live in `config.py`. Edit once; every module picks up t
 
 Five heuristic signals are computed from each vehicle's rolling history window and combined into a weighted confidence score:
 
+Abrupt deceleration uses the change in an **EMA of observed scalar speed** divided by
+elapsed source frame indices over the recent observation window (pixels/frame
+squared), not the sign of image-coordinate acceleration components. Mirroring
+motion left/right or up/down therefore preserves the signal, and a constant-speed
+turn alone does not count as braking. This separate scalar estimate prevents
+heading changes from cancelling vector components; the existing vector EMA
+formulation used by other signals is retained. Its values can change when
+observations have frame gaps: velocity and acceleration ingestion now
+use elapsed frames when a track observation is missing. This intentionally
+corrects the former direction-dependent heuristic across the API, CLI and
+offline evaluator, which share `AccidentScorer`. Thresholds, weights, EMA and
+hysteresis are unchanged; these image-space heuristics remain uncalibrated and
+are not physical acceleration measurements or accident probabilities.
+
 | Signal | Weight | Description |
 |---|---|---|
 | `sudden_stop` | 0.25 | Track speed drops and stays near zero |

@@ -59,6 +59,7 @@ class TrackSnapshot:
     ax: float = 0.0    # Acceleration x (pixels/frame²)
     ay: float = 0.0    # Acceleration y (pixels/frame²)
     speed: float = 0.0 # |v| (pixels/frame)
+    decel_speed: Optional[float] = None # EMA of observed scalar speed for braking only
 
 
 @dataclass
@@ -71,6 +72,7 @@ class _TrackRecord:
     # Smoothed velocity for incremental EMA update
     _ema_vx: Optional[float] = None
     _ema_vy: Optional[float] = None
+    _ema_speed: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,17 +187,26 @@ class AccidentScorer:
             # Velocity estimation via EMA
             if rec._ema_vx is None:
                 vx, vy = 0.0, 0.0
+                decel_speed = 0.0
             else:
-                raw_vx = cx - rec.history[-1].cx if rec.history else 0.0
-                raw_vy = cy - rec.history[-1].cy if rec.history else 0.0
+                dt = frame_idx - rec.history[-1].frame_idx
+                if dt <= 0:
+                    raise ValueError("Track frame indices must increase monotonically")
+                raw_vx = (cx - rec.history[-1].cx) / dt
+                raw_vy = (cy - rec.history[-1].cy) / dt
                 alpha_v = 0.4  # velocity EMA (faster than score EMA)
                 vx = alpha_v * raw_vx + (1.0 - alpha_v) * rec._ema_vx
                 vy = alpha_v * raw_vy + (1.0 - alpha_v) * rec._ema_vy
+                decel_speed = (
+                    alpha_v * math.hypot(raw_vx, raw_vy)
+                    + (1.0 - alpha_v) * rec._ema_speed
+                )
 
             # Acceleration
             if rec.history:
-                ax = vx - rec.history[-1].vx
-                ay = vy - rec.history[-1].vy
+                dt = frame_idx - rec.history[-1].frame_idx
+                ax = (vx - rec.history[-1].vx) / dt
+                ay = (vy - rec.history[-1].vy) / dt
             else:
                 ax, ay = 0.0, 0.0
 
@@ -205,11 +216,13 @@ class AccidentScorer:
                 x1=x1, y1=y1, x2=x2, y2=y2,
                 vx=vx, vy=vy, ax=ax, ay=ay,
                 speed=math.hypot(vx, vy),
+                decel_speed=decel_speed,
             )
             rec.history.append(snap)
             rec.last_seen_frame = frame_idx
             rec._ema_vx = vx
             rec._ema_vy = vy
+            rec._ema_speed = decel_speed
 
     def _purge_stale(self, frame_idx: int):
         stale = [
@@ -269,7 +282,9 @@ class AccidentScorer:
 
     def _signal_abrupt_decel(self) -> float:
         """
-        Returns max normalised deceleration signal across all tracks.
+        Returns max normalised decrease in smoothed observed scalar speed.
+        Direction changes alone are not deceleration. Missing observations
+        contribute their actual elapsed frames, not a single-frame jump.
         """
         w = config.DECEL_WINDOW_FRAMES
         threshold = config.DECEL_THRESHOLD  # negative value
@@ -281,9 +296,12 @@ class AccidentScorer:
             recent = list(rec.history)[-w:]
             if len(recent) < 2:
                 continue
-            accels = [math.hypot(s.ax, s.ay) * (-1 if s.ax < 0 or s.ay < 0 else 1)
-                      for s in recent]
-            mean_accel = sum(accels) / len(accels)
+            elapsed = recent[-1].frame_idx - recent[0].frame_idx
+            if elapsed <= 0:
+                raise ValueError("Track frame indices must increase monotonically")
+            if recent[0].decel_speed is None or recent[-1].decel_speed is None:
+                raise ValueError("Track snapshot is missing the required scalar braking speed")
+            mean_accel = (recent[-1].decel_speed - recent[0].decel_speed) / elapsed
             if mean_accel < threshold:
                 # Normalise: threshold → 0.5, 3× threshold → 1.0
                 signal = min(1.0, (mean_accel - threshold) / (2 * threshold) + 0.5)
