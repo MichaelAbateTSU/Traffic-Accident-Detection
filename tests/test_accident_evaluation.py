@@ -95,8 +95,39 @@ def test_onset_only_annotations_do_not_fabricate_temporal_accuracy(tmp_path):
     assert summary["event_recall"] is None and summary["frame_recall"] is None
     assert summary["false_alarm_episodes_per_normal_hour"] is None
     assert result["first_alarm_after_annotated_onset_delay_seconds"] == 0.5
+    assert result["post_onset_alarm"] is True
+    assert summary["post_onset_positive_clip_hit_rate"] == 1
     with pytest.raises(ValidationError, match="at least one labeled"):
         clip(tmp_path, labels=[None] * 40)
+
+
+def test_pre_onset_only_alarm_is_not_reported_as_collision_detection():
+    result = evaluation.clip_metrics([None] * 40, [True] * 5 + [False] * 35,
+                                     10, clip_label=1, onset_seconds=2.0)
+    assert result["clip_alarm"] is True
+    assert result["post_onset_alarm"] is False
+    assert result["pre_onset_alarm_frames"] == 5 and result["post_onset_alarm_frames"] == 0
+    assert result["first_alarm_after_annotated_onset_delay_seconds"] is None
+    summary = evaluation.aggregate_metrics([result])
+    assert summary["clip_confusion"]["tp"] == 1  # Weak any-alarm clip metric only.
+    assert summary["positive_clips_with_post_onset_alarm"] == 0
+    assert summary["post_onset_positive_clip_hit_rate"] == 0
+    assert "not_collision_detection" in summary["clip_confusion_definition"]
+
+
+@pytest.mark.parametrize("base,source_index,selected", [(0, 35, 15), (1, 36, 15), (None, 35, None)])
+def test_source_offset_and_known_annotation_index_base(tmp_path, base, source_index, selected):
+    c = clip(tmp_path, source_start_frame=20, annotated_onset_frame=source_index,
+             onset_frame_index_base=base, onset_seconds=3.5)
+    assert c.selected_onset_frame_index == selected
+    assert c.selected_onset_seconds == 1.5
+    metrics = evaluation.clip_metrics([None] * 40, [False] * 15 + [True] + [False] * 24,
+                                      10, 1, c.onset_seconds, c.source_start_frame)
+    assert metrics["post_onset_alarm"] is True
+    assert metrics["first_alarm_after_annotated_onset_delay_seconds"] == 0
+    with pytest.raises(ValidationError, match="outside selected"):
+        clip(tmp_path, source_start_frame=20, onset_seconds=1.5)
+
 
 
 def test_image_order_is_natural_and_corruption_never_skips_a_label(tmp_path):
@@ -162,18 +193,30 @@ def test_inference_is_label_blind_and_state_is_fresh_per_clip(tmp_path, monkeypa
     monkeypatch.setattr(accident_scorer, "AccidentScorer", new_scorer)
     first = evaluation.evaluate_clip(clip(tmp_path), object(), tmp_path)
     second = evaluation.evaluate_clip(
-        clip(tmp_path, clip_id="b", labels=[1] * 40, annotated_onset_frame=18), object(), tmp_path,
+        clip(tmp_path, clip_id="b", labels=[1] * 40, source_start_frame=10,
+             annotated_onset_frame=28, onset_frame_index_base=0, onset_seconds=2.8),
+        object(), tmp_path,
+    )
+    unknown = evaluation.evaluate_clip(
+        clip(tmp_path, clip_id="unknown", labels=[1] * 40, source_start_frame=10,
+             annotated_onset_frame=28, onset_seconds=2.8), object(), tmp_path,
     )
     assert first["peak_score"] == second["peak_score"] == 0.39
     assert second["score_at_supplied_onset_frame"] == 0.18
-    assert len(trackers) == len(scorers) == 2
-    assert seen == list(range(40)) * 2
+    assert second["selected_onset_frame_index"] == 18
+    assert second["selected_onset_seconds"] == pytest.approx(1.8)
+    assert unknown["score_at_supplied_onset_frame"] is None
+    assert len(trackers) == len(scorers) == 3
+    assert seen == list(range(40)) * 3
     assert all(s.update.call_count == 40 for s in scorers)
     rows_a = [json.loads(line) for line in (tmp_path / "a" / "frames.jsonl").read_text().splitlines()]
     rows_b = [json.loads(line) for line in (tmp_path / "b" / "frames.jsonl").read_text().splitlines()]
     assert [r["score"] for r in rows_a] == [r["score"] for r in rows_b]
     assert rows_a[-1]["timestamp_seconds"] == 3.9
     assert rows_a[-1]["ground_truth"] == 0 and rows_b[-1]["ground_truth"] == 1
+    assert rows_b[18]["source_frame_index"] == 28
+    assert rows_b[18]["source_timestamp_seconds"] == 2.8
+    assert rows_b[18]["timestamp_seconds"] == 1.8
 
 
 def test_budget_and_missing_media_fail_before_model_loading(tmp_path):
@@ -269,10 +312,12 @@ def test_accident_importer_reports_count_and_timing_disagreements_without_relabe
     )
     monkeypatch.setattr(prepare_accident, "_inspect_video",
                         lambda source: (149, 25.0, (1080, 1920)))
-    result = prepare_accident.prepare(metadata, tmp_path, ["original_00.mp4"], tmp_path / "out.json")
+    result = prepare_accident.prepare(metadata, tmp_path, ["original_00.mp4"], tmp_path / "out.json",
+                                     onset_frame_index_base=0)
     c = result.clips[0]
     assert c.labels == [None] * 149 and c.clip_label == 1
     assert c.onset_seconds == 0.72 and c.annotated_onset_frame == 18
+    assert c.onset_frame_index_base == 0 and c.selected_onset_frame_index == 18
     assert c.group_id == "original" and c.split == "test"
     assert any("actual decoded frames=149" in note for note in c.annotation_notes)
     assert any("no positive temporal interval labels" in note for note in c.annotation_notes)
@@ -332,3 +377,12 @@ def test_production_downscale_preserves_aspect_and_does_not_upscale():
     small = np.zeros((240, 320, 3), np.uint8)
     assert evaluation._resize_frame(small, 1280) is small
     assert evaluation._resize_frame(frame, None) is frame
+
+
+def test_downscale_matches_production_default_interpolation_pixel_for_pixel():
+    frame = np.random.default_rng(0).integers(0, 256, (1080, 1920, 3), dtype=np.uint8)
+    actual = evaluation._resize_frame(frame, 1280)
+    expected = cv2.resize(frame, (1280, 720))
+    area = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_AREA)
+    assert np.array_equal(actual, expected)
+    assert not np.array_equal(actual, area)

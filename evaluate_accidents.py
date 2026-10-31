@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import math
 import os
+import platform
 import random
 import re
 import subprocess
@@ -32,6 +33,7 @@ class Clip(BaseModel):
     clip_label: Literal[0, 1] | None = None
     onset_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     annotated_onset_frame: int | None = Field(default=None, ge=0, strict=True)
+    onset_frame_index_base: Literal[0, 1] | None = None
     annotation_notes: list[str] = Field(default_factory=list)
     # Zero-based labels aligned to the selected source range, not YOLO boxes.
     labels: list[Literal[0, 1] | None] = Field(min_length=1, max_length=18000)
@@ -42,6 +44,8 @@ class Clip(BaseModel):
         if isinstance(value, dict):
             if value.get("clip_label") is not None and type(value["clip_label"]) is not int:
                 raise ValueError("clip_label must be integer 0 or 1")
+            if value.get("onset_frame_index_base") is not None and type(value["onset_frame_index_base"]) is not int:
+                raise ValueError("Onset frame index base must be integer 0 or 1")
             labels = value.get("labels")
             if isinstance(labels, list) and any(
                 label is not None and (type(label) is not int or label not in (0, 1))
@@ -56,9 +60,28 @@ class Clip(BaseModel):
             raise ValueError("A clip must contain at least one labeled frame")
         if self.clip_label == 0 and any(label == 1 for label in self.labels):
             raise ValueError("Normal clip_label contradicts accident frame labels")
-        if self.onset_seconds is not None and self.onset_seconds >= len(self.labels) / self.fps:
-            raise ValueError("Onset timestamp falls outside selected clip")
+        if self.onset_seconds is not None:
+            start_seconds = self.source_start_frame / self.fps
+            end_seconds = (self.source_start_frame + len(self.labels)) / self.fps
+            if not start_seconds <= self.onset_seconds < end_seconds:
+                raise ValueError("Source-relative onset timestamp falls outside selected clip")
+        if self.onset_frame_index_base is not None:
+            if self.annotated_onset_frame is None:
+                raise ValueError("An explicit index base requires an annotated onset frame")
+            if self.annotated_onset_frame < self.onset_frame_index_base:
+                raise ValueError("Onset frame precedes the declared source index base")
         return self
+
+    @property
+    def selected_onset_frame_index(self) -> int | None:
+        if self.annotated_onset_frame is None or self.onset_frame_index_base is None:
+            return None
+        index = self.annotated_onset_frame - self.onset_frame_index_base - self.source_start_frame
+        return index if 0 <= index < len(self.labels) else None
+
+    @property
+    def selected_onset_seconds(self) -> float | None:
+        return None if self.onset_seconds is None else self.onset_seconds - self.source_start_frame / self.fps
 
 
 class Manifest(BaseModel):
@@ -177,7 +200,8 @@ def _runs(values: list[bool]) -> list[tuple[int, int]]:
 
 
 def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
-                 clip_label: int | None = None, onset_seconds: float | None = None) -> dict:
+                 clip_label: int | None = None, onset_seconds: float | None = None,
+                 source_start_frame: int = 0) -> dict:
     if len(labels) != len(detected):
         raise ValueError("Prediction and label lengths differ")
     counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
@@ -201,8 +225,15 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
     if truth is None:
         truth = 1 if any(label == 1 for label in labels) else (0 if all(label == 0 for label in labels) else None)
     negative = truth == 0
-    first_after_onset = next((i / fps for i, flag in enumerate(detected)
-                             if flag and onset_seconds is not None and i / fps >= onset_seconds), None)
+    first_after_onset = next(((source_start_frame + i) / fps for i, flag in enumerate(detected)
+                             if flag and onset_seconds is not None
+                             and (source_start_frame + i) / fps >= onset_seconds), None)
+    pre_onset_frames = None if onset_seconds is None else sum(
+        flag and (source_start_frame + i) / fps < onset_seconds for i, flag in enumerate(detected)
+    )
+    post_onset_frames = None if onset_seconds is None else sum(
+        flag and (source_start_frame + i) / fps >= onset_seconds for i, flag in enumerate(detected)
+    )
     return {
         "frame_confusion": counts,
         "events": hits,
@@ -214,6 +245,9 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
         "negative_clip_alarm": negative and any(detected),
         "ignored_frames": sum(label is None for label in labels),
         "clip_label": truth, "clip_alarm": any(detected),
+        "pre_onset_alarm_frames": pre_onset_frames,
+        "post_onset_alarm_frames": post_onset_frames,
+        "post_onset_alarm": None if onset_seconds is None else first_after_onset is not None,
         "first_alarm_after_annotated_onset_delay_seconds": (
             None if first_after_onset is None else first_after_onset - onset_seconds
         ),
@@ -234,6 +268,9 @@ def aggregate_metrics(clips: list[dict]) -> dict:
             key = (("tp" if clip["clip_alarm"] else "fn") if clip["clip_label"] == 1
                    else ("fp" if clip["clip_alarm"] else "tn"))
             clip_confusion[key] += 1
+    timed_positives = [clip for clip in clips if clip["clip_label"] == 1
+                      and clip["post_onset_alarm"] is not None]
+    post_onset_hits = sum(clip["post_onset_alarm"] for clip in timed_positives)
     def ratio(numerator, denominator):
         return numerator / denominator if denominator else None
     return {
@@ -247,8 +284,12 @@ def aggregate_metrics(clips: list[dict]) -> dict:
         "negative_clip_count": negatives,
         "negative_clip_false_alarm_rate": ratio(negative_alarms, negatives),
         "clip_confusion": clip_confusion,
+        "clip_confusion_definition": "any_alarm_anywhere_in_clip_not_collision_detection",
         "clip_recall": ratio(clip_confusion["tp"], clip_confusion["tp"] + clip_confusion["fn"]),
         "clip_precision": ratio(clip_confusion["tp"], clip_confusion["tp"] + clip_confusion["fp"]),
+        "positive_onset_clip_count": len(timed_positives),
+        "positive_clips_with_post_onset_alarm": post_onset_hits,
+        "post_onset_positive_clip_hit_rate": ratio(post_onset_hits, len(timed_positives)),
     }
 
 
@@ -259,8 +300,7 @@ def _resize_frame(frame, max_frame_side: int | None):
         return frame
     scale = max_frame_side / max(frame.shape[:2])
     return cv2.resize(frame, (max(1, int(frame.shape[1] * scale)),
-                              max(1, int(frame.shape[0] * scale))),
-                      interpolation=cv2.INTER_AREA)
+                              max(1, int(frame.shape[0] * scale))))
 
 
 def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
@@ -309,6 +349,7 @@ def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
                     "clip_id": clip.clip_id, "frame_index": idx,
                     "source_frame_index": clip.source_start_frame + idx,
                     "timestamp_seconds": idx / clip.fps, "ground_truth": truth,
+                    "source_timestamp_seconds": (clip.source_start_frame + idx) / clip.fps,
                     "score": score, "accident_detected": bool(flag),
                     "detections_count": len(detections), "tracks_count": len(tracks), "metadata": meta,
                 }
@@ -332,16 +373,19 @@ def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
         "fps": clip.fps, "frame_shape": list(shape), "frames_processed": len(scores),
         "source_frame_shape": list(source_shape), "max_frame_side": max_frame_side,
         "onset_seconds": clip.onset_seconds, "annotated_onset_frame": clip.annotated_onset_frame,
+        "onset_frame_index_base": clip.onset_frame_index_base,
+        "selected_onset_frame_index": clip.selected_onset_frame_index,
+        "selected_onset_seconds": clip.selected_onset_seconds,
         "annotation_notes": clip.annotation_notes,
         "decoded_frames_sha256": digest.hexdigest(),
         "peak_score": max(scores), "mean_score": sum(scores) / len(scores),
         "score_at_supplied_onset_frame": (
-            scores[clip.annotated_onset_frame] if clip.annotated_onset_frame is not None
-            and clip.annotated_onset_frame < len(scores) else None
+            scores[clip.selected_onset_frame_index] if clip.selected_onset_frame_index is not None else None
         ),
         "vehicle_detections_total": detections_total, "peak_tracks_count": peak_tracks,
         "alarm_frames": sum(predictions), "elapsed_seconds": time.monotonic() - started,
-        **clip_metrics(clip.labels, predictions, clip.fps, clip.clip_label, clip.onset_seconds),
+        **clip_metrics(clip.labels, predictions, clip.fps, clip.clip_label,
+                       clip.onset_seconds, clip.source_start_frame),
     }
 
 
@@ -396,9 +440,11 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
         "source_url": manifest.source_url, "terms": manifest.terms, "split": split,
         "model": str(weights), "model_sha256": _sha256(weights),
         "config": {key: value for key, value in vars(config).items() if key.isupper()},
-        "packages": versions, "code_sha": code_sha, "code_dirty": bool(dirty),
+        "packages": versions, "python_version": platform.python_version(),
+        "code_sha": code_sha, "code_dirty": bool(dirty),
         "device": "cpu", "seed": seed, "torch_threads": 2,
         "max_frame_side": max_frame_side,
+        "resize_interpolation": "OpenCV default INTER_LINEAR",
         "thread_environment": {key: os.environ.get(key) for key in
                                ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "INFERENCE_THREADS")},
         "score_type": "heuristic_not_calibrated_probability",
@@ -411,6 +457,8 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
             "Ignored frames are excluded and break predicted alarm episodes.",
             "Onset-only labels provide clip/timing measures, not temporal frame/event accuracy.",
             "Video timestamps are frame-index/FPS approximations, not variable-rate PTS.",
+            "Clip-level any-alarm indicators do not prove a post-onset collision detection.",
+            "Unknown annotation index bases leave the onset-frame score undefined.",
         ],
     }
     # Partial output is explicitly marked running/failed, never a completed result.

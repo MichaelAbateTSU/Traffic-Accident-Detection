@@ -53,7 +53,7 @@ def _inspect_video(path: Path) -> tuple[int, float, tuple[int, int]]:
 def prepare(metadata: Path, media_root: Path, filenames: list[str], output: Path,
             split_column: str = "split_in_distribution",
             normal_prefixes: list[str] | None = None, normal_prefix_frames: int = 100,
-            clip_frames: int | None = None) -> Manifest:
+            clip_frames: int | None = None, onset_frame_index_base: int | None = None) -> Manifest:
     if split_column not in {"split_in_distribution", "split_geo_aware"}:
         raise ValueError("Select an official split column")
     if metadata.stat().st_size > 10_000_000:
@@ -63,6 +63,8 @@ def prepare(metadata: Path, media_root: Path, filenames: list[str], output: Path
         raise ValueError("Normal prefix frame budget must be 30-3000")
     if clip_frames is not None and not 1 <= clip_frames <= 18000:
         raise ValueError("Explicit clip frame selection must be 1-18000")
+    if onset_frame_index_base not in (None, 0, 1):
+        raise ValueError("Declare a known onset frame index base of 0 or 1, or leave it unknown")
     selected = filenames + normal_prefixes
     if len(set(selected)) != len(selected):
         raise ValueError("Use different clips for collision and normal comparison")
@@ -99,7 +101,9 @@ def prepare(metadata: Path, media_root: Path, filenames: list[str], output: Path
         onset_time = float(row["accident_time"])
         if not math.isfinite(onset_time) or onset_time < 0 or onset_time >= count / fps:
             raise ValueError("Annotation onset timestamp outside decoded clip")
-        if not 0 <= onset_frame < count:
+        checked_index = onset_frame if onset_frame_index_base is None else onset_frame - onset_frame_index_base
+        upper_bound = count + 1 if onset_frame_index_base is None else count
+        if not 0 <= checked_index < upper_bound:
             raise ValueError("Annotation onset frame outside decoded clip")
         if shape != (int(row["height"]), int(row["width"])):
             raise ValueError("Decoded dimensions differ from author metadata")
@@ -113,6 +117,7 @@ def prepare(metadata: Path, media_root: Path, filenames: list[str], output: Path
             f"Author onset seconds={onset_time}; frame={onset_frame}; decoded FPS={fps}.",
             f"Frame/FPS minus annotated onset seconds={onset_frame / fps - onset_time:.6f}.",
             "Onset frame stored verbatim: no undocumented one-based/zero-based conversion.",
+            f"Caller-declared source frame index base: {onset_frame_index_base}; None means unknown.",
             "No accident-end annotation: no positive temporal interval labels are invented.",
             "Onset-delay timestamp uses decoded frame index/FPS; variable-rate precision is limited.",
         ]
@@ -140,7 +145,8 @@ def prepare(metadata: Path, media_root: Path, filenames: list[str], output: Path
             source=str(source), fps=fps, labels=[0 if is_normal_prefix else None] * count,
             clip_label=0 if is_normal_prefix else 1,
             onset_seconds=None if is_normal_prefix else onset_time,
-            annotated_onset_frame=onset_frame, annotation_notes=notes,
+            annotated_onset_frame=onset_frame, onset_frame_index_base=onset_frame_index_base,
+            annotation_notes=notes,
         ))
     manifest = Manifest(version=1, dataset="ACCIDENT selected real test clips (onset-only)",
                         source_url=SOURCE, terms=TERMS, annotation_sha256=_sha256(metadata),
@@ -162,12 +168,14 @@ def main():
     parser.add_argument("--normal-prefix-frames", type=int, default=100)
     parser.add_argument("--clip-frames", type=int,
                         help="Explicitly select a bounded initial positive range (onset must be included)")
+    parser.add_argument("--onset-frame-index-base", type=int, choices=[0, 1],
+                        help="Declare verified source indexing; omit when unknown (no onset-frame score)")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         manifest = prepare(args.metadata, args.media_root, args.videos, args.output,
                            args.split_column, args.normal_prefixes, args.normal_prefix_frames,
-                           args.clip_frames)
+                           args.clip_frames, args.onset_frame_index_base)
     except (ValueError, OSError) as exc:
         parser.exit(1, f"Manifest preparation failed: {exc}\n")
     print(f"Prepared {len(manifest.clips)} onset-only clips; frame/event accuracy is unavailable.")

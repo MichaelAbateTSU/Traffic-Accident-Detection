@@ -828,6 +828,7 @@ times or treating the whole clip as an accident frame:
 python prepare_accident.py --metadata downloads/accident/metadata-real.csv \
   --media-root downloads/accident --videos e17Wq4Hpqlk_02.mp4 \
   --normal-prefixes eQvvIoDMXzY_00.mp4 --normal-prefix-frames 100 \
+  --clip-frames 120 --onset-frame-index-base 0 \
   --output downloads/accident/manifest.json
 python evaluate_accidents.py --manifest downloads/accident/manifest.json \
   --output evaluation_output/accident-test --split test
@@ -837,9 +838,13 @@ ACCIDENT is **CC BY-NC-SA 4.0** per the authors' Kaggle listing:
 research/noncommercial use, attribution, and applicable share-alike conditions.
 Verify current terms before use; do not redistribute media. Cite the authors'
 [ACCIDENT paper](https://arxiv.org/abs/2604.09819). Onset-only runs report
-clip-level detection/score and first alarm after the supplied onset timestamp;
+clip-level any-alarm/score and separately the post-onset alarm and delay;
 frame/event accuracy and normal false-alarm rates remain undefined. Timestamp
 delays are frame-index/FPS approximations, not variable-frame-rate PTS.
+An alarm only before the annotated onset is **not** a post-onset collision
+detection. `clip_confusion`/`clip_recall` describe any alarm anywhere in a clip;
+`post_onset_alarm` and `post_onset_positive_clip_hit_rate` describe the separate
+onset-based check. Neither is calibrated probability or population accuracy.
 The API's existing `DetectionEvent.timestamp_sec` is **processing wall-clock
 elapsed time**, not media time; never compare it directly with a dataset onset.
 Offline `timestamp_seconds` is derived from decoded frame index and source FPS.
@@ -855,10 +860,16 @@ weights, inference size, per-clip elapsed time, vehicle detections, confirmed
 track count, and alarm frames; model variants are not interchangeable benchmarks.
 For production preprocessing, add `--max-frame-side 1280`: frames are
 downscaled before both YOLO and DeepSORT, without upscaling smaller inputs.
+Resizing uses `cv2.resize`'s default **INTER_LINEAR**, matching the worker's
+default pixel interpolation; INTER_AREA is not equivalent. A pixel-level
+regression verifies equality on a nonuniform image, not just output dimensions.
 Set `OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 INFERENCE_THREADS=2` before
 launching the evaluator to match the production thread environment. This is
 an offline host measurement, not validation of a production VM, live-stream
 network latency, concurrent-camera capacity, or its per-job deadline.
+Check the report's actual Torch, torchvision, Ultralytics, OpenCV, NumPy and
+Python versions against the deployment lock, along with actual inference
+threads; matching dimensions/model names alone does not establish runtime parity.
 
 The authors' public GitHub LFS previews can be obtained individually without
 downloading the entire dataset. Two previews have been matched byte-for-byte
@@ -874,16 +885,33 @@ says **head-on**. This is a source inconsistency, not a reason to invent labels.
 The CSV records onset `0.72 s` / frame `18`, and 148 frames; OpenCV decodes
 149 frames at 25 fps. The importer uses actual decoded length and retains the
 external onset frame unchanged. Downloaded footage remains local and ignored.
+For these two byte-matched previews, decoded zero-based frames 18 and 148 were
+checked against source timestamps 0.72 s and 6.644433 s. This justifies the
+explicit `--onset-frame-index-base 0` above, not an indexing assumption about
+other datasets or all ACCIDENT videos.
 
 Provide a JSON manifest with `version: 1`, `dataset`, `source_url`, `terms`, and
 `clips`. Each clip needs `clip_id`, `group_id` (original recording, not a derived
 clip ID), `split` (`train`, `validation`, or `test`), local `source`, `fps`, and
 `labels`. Labels are integer **0** (normal), **1** (accident), or **null** (unknown),
-one per selected frame. `source_start_frame` defaults to zero. All indexing is
-zero-based. Paths are relative to the manifest unless absolute.
+one per selected frame. `source_start_frame` defaults to zero. Label positions and output `frame_index`
+are zero-based within the selected range; `source_frame_index` is zero-based
+within the full source. Paths are relative to the manifest unless absolute.
 Onset-only sources may supply `clip_label` and all-null temporal labels,
 optionally `onset_seconds`, `annotated_onset_frame`, and `annotation_notes`.
-The external onset frame is preserved without guessing its indexing convention.
+`onset_seconds` is **source-relative**, and must lie inside the selected range.
+The report's `selected_onset_seconds` subtracts the selected start's FPS-derived
+source time. Output `timestamp_seconds` is selected-relative;
+`source_timestamp_seconds` is source-relative. These are FPS approximations,
+not variable-rate PTS.
+
+`annotated_onset_frame` is **source-relative** and preserved verbatim.
+Declare `onset_frame_index_base: 0` or `1` only when its convention is known.
+The selected index used for the score is
+`annotated_onset_frame - onset_frame_index_base - source_start_frame`.
+If the base is unknown, or the onset lies outside the selected range,
+`score_at_supplied_onset_frame` is `null`; no indexing convention is guessed.
+Frame-index bases do not change labels or model input.
 
 Preserve original split assignments. Different derived clips of the same
 recording must share a `group_id` and cannot cross splits; duplicate IDs,
