@@ -134,10 +134,13 @@ pip install -r requirements.txt
 
 The YOLO model (`yolo11x.pt`) is downloaded automatically by Ultralytics on first run.
 
+`requirements.txt` includes `setuptools<81` because DeepSORT's PyTorch embedder uses the deprecated `pkg_resources` API to locate its bundled model weights but does not declare that runtime dependency. This also covers Python 3.12+ virtual environments, which no longer include setuptools by default. Keep this constraint until DeepSORT removes that dependency.
+
 ### Verify installation
 
 ```bash
 python -c "from ultralytics import YOLO; import cv2; import fastapi; print('All packages OK')"
+python -c "from tracker import DeepSortTracker; DeepSortTracker(); print('DeepSORT embedder OK')"
 ```
 
 ---
@@ -203,7 +206,7 @@ Start an accident detection job against a stream URL.
 |---|---|---|---|
 | `stream_url` | string (URL) | required | Any source OpenCV can open: HLS, RTSP, MP4 |
 | `max_frames` | integer | `300` | Frame cap (~10 s at 30 fps). Range: 1–18000 |
-| `save_frames` | boolean | `false` | Write annotated frames to `pipeline_output/` |
+| `save_frames` | boolean | `false` | Save raw and annotated images to `pipeline_output/` and publish frame URLs; when false, no images are written or published |
 
 **Response `202 Accepted`:**
 
@@ -359,7 +362,7 @@ GET /incidents?page=1&page_size=20&status=active&min_confidence=0.7
     {
       "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81",
       "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-      "camera_id": "playlist",
+      "camera_id": "R2_061",
       "detection_type": "accident",
       "status": "active",
       "resolved": false,
@@ -410,7 +413,7 @@ Get full detail for a single incident.
   "data": {
     "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6:81",
     "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "camera_id": "playlist",
+    "camera_id": "R2_061",
     "detection_type": "accident",
     "status": "resolved",
     "resolved": true,
@@ -596,6 +599,8 @@ GET /jobs/{job_id}/detections?detail=full&page=1&page_size=50
 
 Resolve or reopen an incident, optionally attaching an operator note (≤ 500 chars). Operator overrides take precedence over the job-derived status everywhere incidents appear (`/incidents`, `/incidents/{id}`, `/incidents/export`, `/dashboard`) and are dropped when the source job is reaped.
 
+Saving a note or repeating `status: "resolved"` preserves the existing resolution time, including the default job completion time. Reopening clears it; resolving again records a new operator time.
+
 ```bash
 curl -X PATCH http://localhost:8000/incidents/3fa85f64-5717-4562-b3fc-2c963f66afa6:42 \
      -H "Content-Type: application/json" \
@@ -616,6 +621,8 @@ Returns the same envelope as `GET /incidents/{incident_id}`. All incident payloa
 
 Downloads incidents as `text/csv` (`Content-Disposition: attachment; filename="incidents.csv"`). Accepts the same filter and sort parameters as `GET /incidents`, without pagination.
 
+Each export uses a single filtered/sorted job-and-override snapshot, so concurrent updates cannot truncate it through a stale count. Text cells that could be interpreted as spreadsheet formulas (`=`, `+`, `-`, `@`, including after leading whitespace/control characters), or start with control characters, are prefixed with an apostrophe. Ordinary text and numeric columns are unchanged; JSON incident notes retain their original values.
+
 Columns: `incident_id, job_id, camera_id, detection_type, status, detected_at, confidence_score, raw_score, frame_idx, timestamp_sec, involved_track_ids, resolved_at, note` (`involved_track_ids` is space-separated).
 
 ```bash
@@ -626,7 +633,9 @@ curl -o incidents.csv "http://localhost:8000/incidents/export?camera_id=SR-60&st
 
 ### `GET /cameras/{camera_id}/latest-frame`
 
-Returns the most recent processed frame for a camera (the highest-index frame of the newest job that has frames). `404` when no frames exist yet.
+Camera IDs are derived consistently for camera status, job summaries, overview counts, incident filters/export, and latest-frame lookup. For common HLS manifests (`playlist.m3u8`, `index.m3u8`, `master.m3u8`, case-insensitive), the parent path segment identifies the camera: `https://mcleansfs3.us-east-1.skyvdn.com/rtplive/R2_061/playlist.m3u8` becomes `R2_061`, not `playlist`. Query strings and fragments do not affect identity. Other filenames (including root-level manifests) retain the filename without its extension; URLs with no path use the host (including port). This remains a best-effort identity, not a camera registry: identical camera path names on different hosts may still share an ID.
+
+Returns the most recent saved frame for a camera (the highest-index frame of the newest job that has saved frames). Submit a job with `save_frames: true` to populate this endpoint; `404` when no saved frames exist yet. Jobs with `save_frames: false` still publish detection events and progress, but their `frames` list remains empty. They do not delete or hide images saved by previous jobs, so this endpoint may still return an older saved frame.
 
 ```json
 {
@@ -651,18 +660,21 @@ camelCase aliases (`cameraId`, `jobId`, `frameIndex`, `imageUrl`, `annotatedUrl`
 ### Running the tests
 
 ```bash
-pip install fastapi pydantic pydantic-settings httpx pytest numpy
+pip install fastapi pydantic pydantic-settings httpx pytest numpy opencv-python
 pytest -q
 ```
 
-The test suite stubs `ultralytics`, `deep_sort_realtime`, and (if missing) `cv2`, so it runs without a GPU or model weights.
+The HTTP contract tests stub unavailable ML dependencies, so they run without a GPU or model weights. Saved-frame tests use a mocked inference pipeline with real OpenCV JPEG writes and HTTP artifact reads; they are skipped if OpenCV is missing.
+
+`tests/test_runtime_installation.py` checks genuine DeepSORT initialization in a fresh subprocess (no ML stubs) when the full runtime dependencies are installed. It loads the bundled MobileNet weights without downloading YOLO weights and is skipped in HTTP-only test environments.
 
 ---
 
 ### Error behavior
 
-- `404` for unknown `job_id`, `incident_id`, or a camera with no processed frames.
+- `404` for unknown `job_id`, `incident_id`, or a camera with no saved frames.
 - `422` for invalid query parameters (for example `page=0`, `min_confidence=1.2`) or invalid PATCH bodies.
+- Worker initialization, capture/read, inference, and image-write errors are logged and recorded as failed jobs with `error` and `completed_at`. Captures are released on completion, frame-limit exits, and failures. A frame's URLs are published only after all three JPEG writes succeed; failed jobs remove incomplete/unpublished images while retaining previously published frames.
 - Legacy endpoints (`/detect-accident`, `/jobs/{job_id}`, `/health`) retain their original response shapes.
 
 ---

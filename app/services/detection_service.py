@@ -101,21 +101,16 @@ def _save_frame_triplet(
     capture_annotated_path = os.path.join(dirs["capture_annotated"], file_name)
     pipeline_output_path = os.path.join(dirs["pipeline_output"], file_name)
 
-    cv2.imwrite(
-        capture_path,
-        frame,
-        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
-    )
-    cv2.imwrite(
-        capture_annotated_path,
-        capture_annotated,
-        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
-    )
-    cv2.imwrite(
-        pipeline_output_path,
-        pipeline_output,
-        [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
-    )
+    for path, image in (
+        (capture_path, frame),
+        (capture_annotated_path, capture_annotated),
+        (pipeline_output_path, pipeline_output),
+    ):
+        if not cv2.imwrite(
+            path, image,
+            [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
+        ):
+            raise OSError(f"Could not write frame image: {path}")
 
     base_url = _artifact_base_url()
     return FrameImages(
@@ -128,7 +123,7 @@ def _save_frame_triplet(
 
 def _prune_old_job_artifacts() -> None:
     """
-    Keep artifact folders for active jobs plus the N most recent terminal jobs.
+    Keep artifacts for active jobs plus the N most recent terminal jobs with images.
 
     This bounds disk usage while avoiding deletion of folders that may still be
     written by running/pending jobs.
@@ -144,7 +139,7 @@ def _prune_old_job_artifacts() -> None:
         if job.status in ("pending", "running")
     }
     terminal_jobs = sorted(
-        [job for job in all_jobs if job.status in ("complete", "failed")],
+        [job for job in all_jobs if job.status in ("complete", "failed") and job.frames],
         key=lambda job: job.completed_at or job.created_at,
         reverse=True,
     )
@@ -197,7 +192,8 @@ def run_detection_job(
     stream_url  : Any source accepted by cv2.VideoCapture — HLS, RTSP, MP4.
     max_frames  : Hard cap on frames processed (keeps response times bounded).
     model       : Pre-loaded YOLO model from app state (avoids reload per job).
-    save_frames : If True, annotated frames are written to pipeline_output/.
+    save_frames : If True, raw and annotated frames are saved and published.
+                  If False, no frame images are written or published.
     """
     logger.info("Job started  job_id=%s  stream_url=%s  max_frames=%d",
                 job_id, stream_url, max_frames)
@@ -215,18 +211,13 @@ def run_detection_job(
     # The YOLO model is *shared* (passed in) but tracker/scorer are
     # stateful and must not be shared across concurrent jobs.
     # ------------------------------------------------------------------
-    tracker = DeepSortTracker()
-    scorer  = AccidentScorer()
-
+    cap = None
+    failure = None
     try:
+        tracker = DeepSortTracker()
+        scorer = AccidentScorer()
         cap = _open_video(stream_url)
-    except RuntimeError as exc:
-        _fail_job(job_id, str(exc))
-        return
-
-    fps = cap.get(0x00000005) or float(pipeline_config.ASSUMED_FPS)  # CAP_PROP_FPS = 5
-
-    try:
+        cap.get(0x00000005)  # CAP_PROP_FPS = 5
         for frame in _iter_video(cap):
             if frames_processed >= max_frames:
                 break
@@ -241,23 +232,24 @@ def run_detection_job(
             score, detected, meta = scorer.update(tracks, frames_processed)
             # ----------------------------------------------------------
 
-            capture_annotated = tracker.draw_tracks(frame, tracks)
-            pipeline_output = capture_annotated
-            if pipeline_config.OVERLAY_SCORE:
-                from pipeline import _overlay_score
+            if save_frames:
+                capture_annotated = tracker.draw_tracks(frame, tracks)
+                pipeline_output = capture_annotated
+                if pipeline_config.OVERLAY_SCORE:
+                    from pipeline import _overlay_score
 
-                pipeline_output = _overlay_score(
-                    capture_annotated.copy(), score, detected, frames_processed
+                    pipeline_output = _overlay_score(
+                        capture_annotated.copy(), score, detected, frames_processed
+                    )
+                frame_images.append(
+                    _save_frame_triplet(
+                        job_id=job_id,
+                        frame_idx=frames_processed,
+                        frame=frame,
+                        capture_annotated=capture_annotated,
+                        pipeline_output=pipeline_output,
+                    )
                 )
-            frame_images.append(
-                _save_frame_triplet(
-                    job_id=job_id,
-                    frame_idx=frames_processed,
-                    frame=frame,
-                    capture_annotated=capture_annotated,
-                    pipeline_output=pipeline_output,
-                )
-            )
 
             if score > peak_confidence:
                 peak_confidence = score
@@ -291,7 +283,17 @@ def run_detection_job(
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unhandled error in job %s", job_id)
-        _fail_job(job_id, repr(exc))
+        failure = repr(exc)
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Could not release capture for job %s", job_id)
+                failure = failure or repr(exc)
+
+    if failure is not None:
+        _fail_job(job_id, failure)
         return
 
     # ------------------------------------------------------------------
@@ -309,7 +311,8 @@ def run_detection_job(
         frames=frame_images,
         completed_at=_utcnow(),
     )
-    _prune_old_job_artifacts()
+    if save_frames:
+        _prune_old_job_artifacts()
     logger.info(
         "Job complete  job_id=%s  frames=%d  accident=%s  peak=%.3f  events=%d",
         job_id, frames_processed, accident_detected, peak_confidence, len(events),
@@ -328,6 +331,27 @@ def _fail_job(job_id: str, error: str) -> None:
         error=error,
         completed_at=_utcnow(),
     )
-    _prune_old_job_artifacts()
-
-
+    job = job_store.get(job_id)
+    if job is not None:
+        dirs = _job_output_dirs(job_id)
+        published = {f"{frame.frame_index:06d}.jpg" for frame in job.frames}
+        for kind in ("capture", "capture_annotated", "pipeline_output"):
+            directory = Path(dirs[kind])
+            if not directory.exists():
+                continue
+            try:
+                for image in directory.iterdir():
+                    if image.is_file() and image.name not in published:
+                        image.unlink()
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                logger.exception("Could not clean incomplete artifacts for job %s in %s", job_id, directory)
+        base = Path(dirs["base"])
+        try:
+            if base.exists() and not any(base.iterdir()):
+                base.rmdir()
+        except OSError:
+            logger.exception("Could not remove empty artifact directory for job %s", job_id)
+    if job is not None and job.frames:
+        _prune_old_job_artifacts()

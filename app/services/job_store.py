@@ -40,12 +40,18 @@ def _extract_camera_id(stream_url: str) -> str:
     """
     Derive a stable camera identifier from a stream URL.
 
-    Uses the last path segment when available; otherwise falls back to host.
+    Common HLS manifest names use the parent path segment as the camera ID.
+    Other paths use the filename without its extension, or fall back to host.
     """
     parsed = urlparse(stream_url)
     path = parsed.path.strip("/")
     if path:
-        leaf = path.split("/")[-1]
+        segments = [segment for segment in path.split("/") if segment]
+        leaf = segments[-1]
+        if len(segments) > 1 and leaf.lower() in {
+            "playlist.m3u8", "index.m3u8", "master.m3u8",
+        }:
+            return segments[-2]
         if "." in leaf:
             leaf = leaf.rsplit(".", 1)[0]
         if leaf:
@@ -251,11 +257,11 @@ class JobStore:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         page: int = 1,
-        page_size: int = 20,
+        page_size: int | None = 20,
         sort: str = "-detected_at",
     ) -> tuple[list[dict], int]:
         """
-        Return flattened incident/event records with pagination.
+        Return one filtered/sorted snapshot; page_size=None disables pagination.
 
         Record fields:
             incident_id, job, event, camera_id, status, detected_at, detection_type
@@ -297,6 +303,8 @@ class JobStore:
         flattened.sort(key=key_fn, reverse=reverse)
 
         total = len(flattened)
+        if page_size is None:
+            return flattened, total
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         return flattened[start_idx:end_idx], total
@@ -332,19 +340,32 @@ class JobStore:
 
         Returns the updated incident record, or None if the incident is unknown.
         Passing note=None keeps any previously stored note.
+        Resolution time is preserved until an active incident is resolved again.
         """
-        if self.get_incident(incident_id) is None:
+        parsed = _parse_incident_id(incident_id)
+        if parsed is None:
             return None
+        raw_job_id, frame_idx = parsed
         with self._lock:
-            prev = self._incident_overrides.get(incident_id, {})
+            job = self._jobs.get(raw_job_id)
+            if job is None:
+                return None
+            event = next((event for event in job.events if event.frame_idx == frame_idx), None)
+            if event is None:
+                return None
+            cam = _extract_camera_id(job.stream_url)
+            prev = _build_incident_record(job, event, cam, self._incident_overrides)
             now = _utcnow()
+            resolved_at = None
+            if status == "resolved":
+                resolved_at = prev["resolved_at"] if prev["status"] == "resolved" else now
             self._incident_overrides[incident_id] = {
                 "status": status,
-                "note": note if note is not None else prev.get("note"),
-                "resolved_at": now if status == "resolved" else None,
+                "note": note if note is not None else prev["note"],
+                "resolved_at": resolved_at,
                 "updated_at": now,
             }
-        return self.get_incident(incident_id)
+            return _build_incident_record(job, event, cam, self._incident_overrides)
 
     def latest_frame_for_camera(self, camera_id: str) -> tuple[DetectionResult, object] | None:
         """
