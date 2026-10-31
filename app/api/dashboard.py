@@ -52,7 +52,7 @@ def _camera_statuses() -> list[FrontendCameraStatus]:
                 status=_status_from_job(job.status),
                 stream_url=job.stream_url,
                 last_job_id=job.job_id,
-                last_seen_at=job.completed_at or job.created_at,
+                last_seen_at=job.completed_at or job.started_at or job.created_at,
             )
         )
     return out
@@ -179,4 +179,3 @@ async def get_dashboard(
         incidents=FrontendIncidentList(items=items, meta=meta),
         cameras=_camera_statuses(),
     )
-

@@ -72,6 +72,7 @@ def _to_incident_detail(record: dict) -> IncidentDetail:
         stream_url=job.stream_url,
         job_status=job.status,
         created_at=job.created_at,
+        started_at=job.started_at,
         completed_at=job.completed_at,
     )
 
