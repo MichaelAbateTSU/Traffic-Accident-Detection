@@ -10,6 +10,31 @@ from starlette.routing import Mount
 
 from app.services import detection_service
 from app.services.job_store import job_store
+from app.core.config import settings
+
+
+def test_worker_deadline_and_frame_retention(frame_pipeline, monkeypatch):
+    _, _, _, _, _, saver = frame_pipeline
+    monkeypatch.setattr(settings, "max_saved_frames_per_job", 1)
+    source = "https://cams.example.com/cam-a.m3u8"
+    job = job_store.create(source)
+    detection_service.run_detection_job(job.job_id, source, 2, object(), save_frames=True)
+    assert len(job_store.get(job.job_id).frames) == saver.call_count == 1
+    monkeypatch.setattr(settings, "job_timeout_seconds", 1)
+    monkeypatch.setattr(detection_service.time, "monotonic", Mock(side_effect=[0, 2]))
+    timed = job_store.create(source)
+    detection_service.run_detection_job(timed.job_id, source, 2, object())
+    assert job_store.get(timed.job_id).status == "failed"
+    assert "JOB_TIMEOUT_SECONDS" in job_store.get(timed.job_id).error
+
+
+def test_empty_capture_is_an_explicit_failure(frame_pipeline, monkeypatch):
+    monkeypatch.setattr(detection_service, "_iter_video", lambda _: iter([]))
+    source = "https://cams.example.com/cam-a.m3u8"
+    job = job_store.create(source)
+    detection_service.run_detection_job(job.job_id, source, 2, object())
+    result = job_store.get(job.job_id)
+    assert result.status == "failed" and "decodable" in result.error
 
 
 @pytest.fixture()

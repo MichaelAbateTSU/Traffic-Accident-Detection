@@ -111,6 +111,8 @@ def _save_frame_triplet(
             [int(cv2.IMWRITE_JPEG_QUALITY), pipeline_config.JPEG_QUALITY],
         ):
             raise OSError(f"Could not write frame image: {path}")
+        if os.path.getsize(path) > settings.max_saved_frame_bytes:
+            raise OSError("Saved frame exceeds MAX_SAVED_FRAME_BYTES")
 
     base_url = _artifact_base_url()
     return FrameImages(
@@ -195,8 +197,7 @@ def run_detection_job(
     save_frames : If True, raw and annotated frames are saved and published.
                   If False, no frame images are written or published.
     """
-    logger.info("Job started  job_id=%s  stream_url=%s  max_frames=%d",
-                job_id, stream_url, max_frames)
+    logger.info("Job started  job_id=%s  max_frames=%d", job_id, max_frames)
 
     job_store.update(job_id, status="running", frames=[])
 
@@ -216,11 +217,23 @@ def run_detection_job(
     try:
         tracker = DeepSortTracker()
         scorer = AccidentScorer()
-        cap = _open_video(stream_url)
+        if settings.environment == "production":
+            from app.services.video_source import open_production_video
+            cap = open_production_video(stream_url)
+        else:
+            cap = _open_video(stream_url)
         cap.get(0x00000005)  # CAP_PROP_FPS = 5
         for frame in _iter_video(cap):
             if frames_processed >= max_frames:
                 break
+            if time.monotonic() - t_job_start > settings.job_timeout_seconds:
+                raise TimeoutError("Detection exceeded JOB_TIMEOUT_SECONDS")
+            if settings.environment == "production":
+                import cv2
+                height, width = frame.shape[:2]
+                scale = settings.max_frame_dimension / max(height, width)
+                if scale < 1:
+                    frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
 
             t_frame = time.monotonic() - t_job_start
 
@@ -232,7 +245,7 @@ def run_detection_job(
             score, detected, meta = scorer.update(tracks, frames_processed)
             # ----------------------------------------------------------
 
-            if save_frames:
+            if save_frames and len(frame_images) < settings.max_saved_frames_per_job:
                 capture_annotated = tracker.draw_tracks(frame, tracks)
                 pipeline_output = capture_annotated
                 if pipeline_config.OVERLAY_SCORE:
@@ -280,6 +293,9 @@ def run_detection_job(
                 events=list(events),
                 frames=list(frame_images),
             )
+
+        if frames_processed == 0:
+            raise RuntimeError("The source did not yield any decodable video frames.")
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unhandled error in job %s", job_id)
