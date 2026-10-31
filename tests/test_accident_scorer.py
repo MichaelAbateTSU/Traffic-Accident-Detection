@@ -15,6 +15,7 @@ def snapshots(velocities, frames=None):
             frame, 0, 0, 100, 0, 0, 10, 10,
             vx=vx, vy=vy, ax=vx - previous[0], ay=vy - previous[1],
             speed=math.hypot(vx, vy),
+            decel_speed=math.hypot(vx, vy),
         ))
         previous = vx, vy
     return result
@@ -83,3 +84,40 @@ def test_public_score_and_metadata_preserve_direction_symmetry():
             score, alarm, metadata = scorer.update([track], frame)
         outputs.append((score, alarm, metadata["signal_values"]))
     assert outputs[0] == outputs[1]
+
+
+def public_motion(displacements):
+    scorer = AccidentScorer()
+    x = y = 0
+    for frame, (dx, dy) in enumerate([(0, 0)] + displacements):
+        x += dx
+        y += dy
+        track = SimpleNamespace(track_id=1, to_tlbr=lambda x=x, y=y: [x, y, x + 10, y + 10])
+        result = scorer.update([track], frame)
+    return scorer, result
+
+
+@pytest.mark.parametrize("turn", [(0, 100), (-100, 0), (60, 80)])
+def test_public_constant_scalar_speed_turn_and_reversal_do_not_brake(turn):
+    scorer, (_, _, metadata) = public_motion([(100, 0)] * 15 + [turn])
+    snap = scorer._records[1].history[-1]
+    assert metadata["signal_values"]["abrupt_decel"] == 0
+    assert snap.decel_speed > 99
+    if turn == (0, 100):
+        assert snap.speed < 73  # Preserve vector EMA cancellation for other signals.
+    if turn == (-100, 0):
+        assert snap.speed < 21
+
+
+def test_public_scalar_speed_braking_while_turning_is_detected():
+    _, (_, _, metadata) = public_motion([(100, 0)] * 15 + [(0, 40), (0, 20), (0, 0)])
+    assert metadata["signal_values"]["abrupt_decel"] > 0
+
+
+def test_public_scalar_speed_gap_normalization():
+    scorer = AccidentScorer()
+    for frame, x in [(0, 0), (1, 100), (4, 400)]:
+        track = SimpleNamespace(track_id=1, to_tlbr=lambda x=x: [x, 0, x + 10, 10])
+        _, _, metadata = scorer.update([track], frame)
+    assert scorer._records[1].history[-1].decel_speed == pytest.approx(64)
+    assert metadata["signal_values"]["abrupt_decel"] == 0
