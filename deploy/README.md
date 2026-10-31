@@ -35,8 +35,11 @@ Public ACME issuance, VM reboot and live-cloud availability remain unverified.
 
 ## Render Free feasibility
 
-**The current backend cannot safely run on Render Free.** No Render service
+**The current backend cannot safely run on Render Free.** No Render backend service
 was provisioned, and no public deployment is implied by this assessment.
+The static frontend is hosted at
+`https://traffic-accident-detection-frontend.onrender.com`; this does not mean
+an inference backend is live or that the frontend can run remote detection yet.
 [Render's compute plans](https://render.com/docs/compute-plans) specify
 0.1 CPU / 512 MB for free web services.
 [Render's Free documentation](https://render.com/docs/free) describes idle
@@ -198,6 +201,16 @@ Privately put the generated token in `API_TOKEN` in `deploy/.env`, then configur
   legitimate redirect, variant manifest, segment and key CDN host. HTTPS-only
   sources and segments are intentional; private-camera/RTSP/HTTP streams are
   not supported by this public production deployment.
+
+For the hosted Render frontend, explicitly set
+`CORS_ORIGINS=https://traffic-accident-detection-frontend.onrender.com` on the
+eventual authorized backend. To retain the GitHub Pages frontend too, set
+`CORS_ORIGINS=https://traffic-accident-detection-frontend.onrender.com,https://michaelabatetsu.github.io`.
+These are exact origins, without paths or trailing slashes; do not use a
+wildcard. This is operator deployment configuration, not a runtime default
+change or a claim that a backend exists. Configure the frontend's API URL only
+after a genuine HTTPS backend is deployed and verified; keep the bearer token
+out of public static assets and acquire it privately at runtime.
 
 The example registry matches the frontend's R2_061 through R2_069 sources at
 `https://mcleansfs3.us-east-1.skyvdn.com/rtplive/<camera>/playlist.m3u8`.
