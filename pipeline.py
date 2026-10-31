@@ -187,6 +187,7 @@ def run_pipeline(
     test_mode: bool = False,
     display: bool = True,
     max_test_frames: int = 300,
+    experimental_scorer_source_fps: float | None = None,
 ):
     """
     Main processing loop.
@@ -198,6 +199,10 @@ def run_pipeline(
     display        : show annotated frame in a cv2 window
     max_test_frames: number of frames to process in test mode
     """
+    scorer = (
+        AccidentScorer(timebase="experimental_constant_fps", source_fps=experimental_scorer_source_fps)
+        if experimental_scorer_source_fps is not None else None
+    )
     # ---- Setup ----
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
@@ -206,7 +211,11 @@ def run_pipeline(
     print(f"Model ready. Vehicle classes: {config.VEHICLE_CLASSES}\n")
 
     tracker = DeepSortTracker()
-    scorer  = AccidentScorer()
+    if scorer is None:
+        scorer = AccidentScorer()
+    if experimental_scorer_source_fps is not None:
+        print(f"EXPERIMENTAL scorer: trusted constant source FPS={experimental_scorer_source_fps}; "
+              "capture FPS is nominal, not verified timing.")
 
     # ---- Open source ----
     is_image_folder = os.path.isdir(source)
@@ -333,7 +342,8 @@ def _save_jpeg(path: str, frame: np.ndarray):
     cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), config.JPEG_QUALITY])
 
 
-def run_snapshot_test(source: str, display: bool = True):
+def run_snapshot_test(source: str, display: bool = True,
+                      experimental_scorer_source_fps: float | None = None):
     """
     Capture exactly SNAPSHOT_FRAME_COUNT frames at SNAPSHOT_INTERVAL_SECONDS
     intervals, run the full YOLO → DeepSORT → AccidentScorer pipeline on each,
@@ -346,6 +356,10 @@ def run_snapshot_test(source: str, display: bool = True):
     captures/scores/frame_NN.json     per-frame score + metadata
     captures/final_score.json         aggregate score across all frames
     """
+    scorer = (
+        AccidentScorer(timebase="experimental_constant_fps", source_fps=experimental_scorer_source_fps)
+        if experimental_scorer_source_fps is not None else None
+    )
     run_ts = datetime.datetime.now()
 
     _prepare_snapshot_dirs()
@@ -354,7 +368,11 @@ def run_snapshot_test(source: str, display: bool = True):
     print(f"Loading YOLO model: {config.YOLO_MODEL}")
     model   = YOLO(config.YOLO_MODEL)
     tracker = DeepSortTracker()
-    scorer  = AccidentScorer()
+    if scorer is None:
+        scorer = AccidentScorer()
+    if experimental_scorer_source_fps is not None:
+        print(f"EXPERIMENTAL scorer: trusted constant source FPS={experimental_scorer_source_fps}; "
+              "consecutive reads, not wall-clock snapshot intervals.")
     print(f"Model ready. Vehicle classes: {config.VEHICLE_CLASSES}")
     print(f"Source : {source}")
     print(f"Frames : {SNAPSHOT_FRAME_COUNT} @ 1 frame/{SNAPSHOT_INTERVAL_SECONDS}s\n")
@@ -419,6 +437,9 @@ def run_snapshot_test(source: str, display: bool = True):
             "involved_track_ids": meta.get("involved_track_ids", []),
             "event_region": meta.get("event_region"),
         }
+        if experimental_scorer_source_fps is not None:
+            frame_data["timebase"] = "experimental_constant_fps"
+            frame_data["source_fps"] = experimental_scorer_source_fps
         score_path = os.path.join("captures", "scores", f"frame_{n:02d}.json")
         with open(score_path, "w") as f:
             json.dump(frame_data, f, indent=2)
@@ -467,6 +488,9 @@ def run_snapshot_test(source: str, display: bool = True):
         "accident_detected": final_detected,
         "method": "mean",
     }
+    if experimental_scorer_source_fps is not None:
+        final_data["timebase"] = "experimental_constant_fps"
+        final_data["source_fps"] = experimental_scorer_source_fps
     final_path = os.path.join("captures", "final_score.json")
     with open(final_path, "w") as f:
         json.dump(final_data, f, indent=2)
@@ -520,6 +544,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Suppress the cv2 preview window (useful for headless servers).",
     )
     p.add_argument(
+        "--experimental-scorer-source-fps", type=float,
+        help="Opt in to experimental timing using this trusted constant source rate, not nominal capture FPS.",
+    )
+    p.add_argument(
         "--snapshot-test",
         action="store_true",
         help=(
@@ -536,6 +564,7 @@ if __name__ == "__main__":
         run_snapshot_test(
             source=args.source,
             display=not args.no_display,
+            experimental_scorer_source_fps=args.experimental_scorer_source_fps,
         )
     else:
         run_pipeline(
@@ -543,4 +572,5 @@ if __name__ == "__main__":
             test_mode=args.test,
             display=not args.no_display,
             max_test_frames=args.max_test_frames,
+            experimental_scorer_source_fps=args.experimental_scorer_source_fps,
         )

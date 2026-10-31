@@ -35,15 +35,15 @@ IOU_THRESHOLD = 0.45
 # ---------------------------------------------------------------------------
 # History / rolling time window
 # ---------------------------------------------------------------------------
-# Assumed frame rate used to convert seconds → frames when the real FPS is
-# not yet known (e.g. first few frames of a stream).  Pipeline overrides this
-# with the measured stream FPS once it is available.
+# Legacy reference rate for fixed frame-unit settings, not a measured timebase.
+# Default scoring ignores source FPS. The experimental timebase requires an
+# explicit trusted constant rate and does not change these reference settings.
 ASSUMED_FPS = 10
 
 # How many seconds of track history to keep per vehicle
 HISTORY_WINDOW_SECONDS = 5
 
-# Derived: history window in frames (recalculated in pipeline with real FPS)
+# Fixed observation-count limit; the pipeline does not recalculate it.
 HISTORY_WINDOW_FRAMES = ASSUMED_FPS * HISTORY_WINDOW_SECONDS  # 50 frames default
 
 # How many frames to keep a "lost" track's history after it disappears

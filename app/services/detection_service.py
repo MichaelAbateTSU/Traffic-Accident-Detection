@@ -222,7 +222,15 @@ def run_detection_job(
             if settings.deepsort_embedder_batch_size == 16
             else DeepSortTracker(embedder_batch_size=settings.deepsort_embedder_batch_size)
         )
-        scorer = AccidentScorer()
+        scorer = (
+            AccidentScorer() if settings.experimental_scorer_source_fps is None
+            else AccidentScorer(timebase="experimental_constant_fps",
+                                source_fps=settings.experimental_scorer_source_fps)
+        )
+        if settings.experimental_scorer_source_fps is not None:
+            logger.warning("Experimental constant-FPS scorer job_id=%s trusted_source_fps=%s; "
+                           "capture FPS is nominal, not verified timing",
+                           job_id, settings.experimental_scorer_source_fps)
         if settings.environment == "production":
             from app.services.video_source import open_production_video
             cap = open_production_video(stream_url)

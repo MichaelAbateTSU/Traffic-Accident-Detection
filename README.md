@@ -196,6 +196,7 @@ LOG_LEVEL=INFO
 | `MAX_SAVED_FRAMES_PER_JOB` | `300` | Stops saving images at this count without stopping inference |
 | `MAX_SAVED_FRAME_BYTES` | `2000000` | Oversized image writes fail explicitly |
 | `JOB_TIMEOUT_SECONDS` | `300` | Job deadline, checked between frames |
+| `EXPERIMENTAL_SCORER_SOURCE_FPS` | unset/blank (legacy mode) | Explicit trusted constant FPS in `(0, 240]` for **every** admitted source; enables experimental scoring, never inferred from capture FPS |
 
 ---
 
@@ -1033,6 +1034,204 @@ classification/probability calibration requires separately trained/calibrated
 models and group-separated evaluation data. No labels or accuracy are fabricated
 when external dataset access is unavailable.
 
+### Legacy frame-rate reproduction
+
+**Default scoring does not use source FPS.** The production worker
+reads and discards capture FPS; the continuous CLI displays it; the evaluator
+validates it and uses it for output timestamps/metrics. All three create
+`AccidentScorer()` and increment a decoded-frame counter. The snapshot CLI
+also uses consecutive indices: sleeping between reads does not establish that
+the next decoded frame is one source-second later. Image-folder CLI input
+assumes 10 FPS without timing evidence.
+
+Reproduce the legacy behavior without downloading models:
+
+```bash
+python -m pytest -q tests/test_scorer_timing.py tests/test_accident_scorer.py tests/test_accident_evaluation.py
+python -m pytest -q -s tests/test_scorer_timing.py::test_report_measured_trajectories
+```
+
+The timing tests feed deterministic positions through the real scorer, plus
+mocked inference/capture/tracking through production, CLI, snapshot and
+evaluation entry points. They are **characterization tests of existing
+behavior**, not acceptance criteria for a future FPS correction. All use fixed
+40-by-40-pixel boxes and the same four-second trajectories sampled at 5, 10,
+25 and 50 FPS; there is no threshold tuning. Selected results:
+
+| Timed trajectory | FPS | Peak score | First stop signal (seconds) | Peak deceleration signal |
+|---|---|---|---|---|
+| Steady 100 px/s | 10 | 0.0000 | None | 0.0000 |
+| Steady 100 px/s | 25 | 0.1250 | 0.16 | 0.0000 |
+| 1000 px/s, braking continuously from second 1 to 2 at -1000 px/s squared | 10 | 0.1935 | 2.70 | 1.0000 |
+| Same continuous braking | 25 | 0.1250 | 2.12 | 0.0000 |
+| Two tracks approach at 100 px/s each, overlap and stop at second 0.95 | 10 | 0.4180 | 1.50 | 0.0000 |
+| Same overlap trajectory | 25 | 0.5946 | 0.16 (before overlap) | 0.0000 |
+
+No trajectory in this reproduction crosses the 0.65 alarm threshold.
+The steady-motion difference is a unit mismatch, not loss of an impact
+between samples: 100 px/s becomes 10 px/frame at 10 FPS but 4 px/frame at
+25 FPS, below the unchanged 5 px/frame stop threshold. Continuous braking
+also has FPS-dependent pixel/frame-squared units. These measurements do not
+identify the cause of any particular real clip's missed impact or establish
+calibrated accuracy.
+
+Independent temporal checks expose why converting speeds alone is incomplete:
+
+| Legacy rule | At 10 FPS | At 25 FPS |
+|---|---|---|
+| Five stationary observations, first observed at time zero | First signal at 0.40 s | First signal at 0.16 s |
+| History of 50 observations (oldest-to-newest span) | 4.90 s | 1.96 s |
+| Lost-track grace of 10 frame indices (inclusive boundary) | 1.00 s | 0.40 s |
+| Collision-event memory of 15 frame indices (inclusive boundary) | 1.50 s | 0.60 s |
+| Score and velocity EMAs | One update per observation | One update per observation |
+
+The eight-observation braking window, six-observation convergence window and
+five-observation direction-change window likewise have sample-dependent
+durations. Reversal tests preserve the direction-independent scalar braking
+correction. Gap tests show that displacement uses elapsed source indices,
+but the EMAs still tick once per observation: every-other-frame sampling at
+10 FPS doubles the 50-observation history span to 9.80 seconds. A reappearing
+track can retain five stationary observations across a long gap; ingesting
+it precedes stale-track purging. Current convergence compares history entries
+by position in the deque, not by shared source timestamps.
+
+Some differences are expected even with correct timing. For these boxes,
+geometric overlap starts at second 0.83636; first observed overlap is 0.90 at
+10 FPS and 0.84 at 25 FPS, both within one sampling interval. A synthetic
+overlap entirely between samples is unobserved. Exact score equality across
+rates is not a valid general acceptance requirement, especially with real
+YOLO/DeepSORT detections, occlusions and track confirmation/age rules that
+also depend on observations.
+
+**No automatic FPS correction is enabled.** Production in legacy mode accepts unknown, zero, negative,
+NaN and infinite reported FPS because it ignores the value. The CLI silently
+falls back for unknown/nonpositive/NaN FPS and even accepts infinity; neither
+is a verified timebase. Evaluation rejects nonfinite/invalid manifest FPS and
+invalid or mismatched video FPS, but frame-index/FPS timestamps are still not
+variable-rate PTS.
+
+Blindly changing global `ASSUMED_FPS`, scaling thresholds alone, interpolating
+unobserved collisions, or claiming that capture FPS proves timing reliability
+does not establish correct timing. Production resizing/viewpoint dependence
+remains a separate limitation.
+
+### Experimental trusted constant-FPS scorer
+
+**Opt-in only; legacy is the unchanged default.** This experiment addresses
+measured source-rate unit/window/EMA dependence, not accident accuracy. Select
+a finite positive constant source rate, at most **240 FPS**, that you have independently established:
+
+```bash
+# CLI video or contiguous image sequence; 25 is caller-supplied trusted FPS.
+python pipeline.py --source video.mp4 --no-display --experimental-scorer-source-fps 25
+
+# Offline evaluator explicitly trusts each clip's declared manifest FPS.
+python evaluate_accidents.py --manifest manifest.json --output evaluation_output/timed \
+  --experimental-constant-fps
+
+# API deployment: opt in only if EVERY admitted source has this trusted rate.
+EXPERIMENTAL_SCORER_SOURCE_FPS=25 uvicorn app.main:app --workers 1
+```
+
+The API setting is a deployment-wide assertion, not a per-camera rate lookup.
+Docker Compose forwards the optional setting from `deploy/.env`; blank disables
+it, and the example deliberately leaves it blank.
+Leave it unset for mixed-rate/unknown-rate sources; this mode must not be
+enabled on a heterogeneous camera deployment. Snapshot CLI accepts the same
+flag but assumes **consecutive source frames**, regardless of sleeps between
+reads. Neither CLI nor the API substitutes nominal capture FPS for the
+explicit rate. The evaluator already validates video FPS against the manifest,
+but agreement is not proof of constant frame timing. Missing/zero/negative/
+boolean/nonfinite/above-240 rates in an explicitly selected scorer timebase fail, as do
+malformed/nonincreasing source indices. At Python level:
+
+```python
+scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+score, alarm, metadata = scorer.update(tracks, source_frame_index)
+```
+
+The existing 10-FPS configuration stays in reference-frame units. The
+experimental implementation uses elapsed reference ticks
+`source_frame_difference * 10 / source_fps` for observed velocity and
+acceleration, and `1 - (1 - alpha) ** elapsed_reference_ticks` for velocity,
+scalar-speed and score EMAs. The first observed score update represents one
+source interval; no earlier track or collision is inferred.
+
+An N-observation legacy window becomes an **N-1 reference-tick span**, matching
+the inclusive legacy endpoints at 10 FPS: history 4.9 seconds, stop evidence
+0.4 seconds, braking 0.7 seconds, approach 0.5 seconds and erratic-direction
+history 0.4 seconds. At nonaligned rates, windows retain one observed boundary
+sample at/before the cutoff, so the span can exceed the target by at most one
+source interval; no sample is interpolated. Stops require the full elapsed
+span of observed low-speed evidence. Direction changes compare observed
+velocity vectors at a lag of at least one reference tick, rather than an
+arbitrarily short high-FPS interval. Convergence pairs only shared source times.
+Collision-event expiry is 1.5 seconds, and lost-track retention is 1 second,
+with inclusive expiry boundaries as in legacy mode.
+The 240-FPS ceiling matches evaluation manifests and bounds time-window
+history storage without dropping in-window evidence: at 240 FPS the default
+4.9-second history retains 1,177 observations including its boundary.
+Unrestricted extreme rates previously could retain growing histories and
+produce nonfinite motion estimates; unsupported rates now fail consistently
+in the scorer, service settings and CLI.
+
+**Missing observation policy:** skipped source indices or a track absent from
+an intervening update restart that track's motion history on reappearance.
+No displacement, braking, stop, direction or convergence evidence is invented
+across the gap. Retained-but-absent tracks cannot contribute current signals or
+new overlaps; a newly restarted track does not contribute traffic slowdown
+before a velocity observation. Remembered collision events can remain until
+their normal expiry, but post-collision stationary/direction evidence must
+come from a current uninterrupted history. Score EMA decays over skipped
+intervals with zero evidence, then incorporates only the current observation's
+interval. An explicit empty-track update also contributes zero evidence.
+Stop-only event focus selects current observed tracks whose histories actually
+contribute the stop signal, not stale retained boxes, new tracks or tracks
+that only just slowed down. Intentionally remembered collision participants/regions remain in
+event metadata until their normal expiry; legacy focus selection is unchanged.
+
+Tests preserve **exact dense 10-FPS legacy scores, signals and hysteresis**
+(apart from explicit experimental metadata). Legacy mode, including its gap
+behavior, is unchanged. Representative experimental measurements:
+
+| FPS | Steady 100 px/s peak score | Continuous braking peak | Overlap peak |
+|---|---|---|---|
+| 5 | 0.0000 | 0.1931 | 0.4173 |
+| 10 | 0.0000 | 0.1935 | 0.4180 |
+| 23 | 0.0000 | 0.1942 | 0.4158 |
+| 25 | 0.0000 | 0.1939 | 0.4164 |
+| 50 | 0.0000 | 0.1941 | 0.4166 |
+
+Braking reaches signal 1 at every tested rate. Peak differences from the
+10-FPS reference stay below 0.003 for these trajectories, not zero; stop and
+direction-memory comparisons allow two observed endpoint intervals. These
+are executable tolerances on synthetic trajectories, not tuned detection
+thresholds or accuracy claims. Reproduce the measurements:
+
+```bash
+python -m pytest -q -s tests/test_scorer_timing.py::test_experimental_reference_motion_and_signal_differences_are_quantified
+python -m pytest -q tests/test_scorer_timing.py tests/test_accident_scorer.py \
+  tests/test_accident_evaluation.py tests/test_saved_frames.py tests/test_production.py
+```
+
+**Remaining limits:** capture FPS is nominal, VFR and dropped frames whose
+source indices are unknown are unsupported, DeepSORT confirmation/age/Kalman
+timing remains observation-based. Experimental scoring excludes DeepSORT
+predicted-only tracks (`time_since_update > 0`); reappearance restarts evidence.
+For custom track objects without this attribute, the caller explicitly asserts
+that supplied tracks are current observations. It must not supply predicted/
+absent tracks as observed gap-free evidence. Production's contiguous decoded counter
+cannot identify unreported decoder drops. No interpolation can recover a
+collision between samples. These constraints prevent enabling the experiment
+automatically or presenting it as a production-calibrated probability.
+Production/CLI/evaluator regressions explicitly simulate zero YOLO detections
+with confirmed predicted-only tracks: legacy continues scoring them, while the
+experimental mode excludes them and restarts history on genuine reappearance.
+This demonstrates the policy, not the cause of any particular missed alarm.
+Production logs the selected rate, CLI announces it, and experimental
+evaluator/snapshot metadata explicitly records the mode; legacy output shapes
+stay unchanged.
+
 ---
 
 ## Configuration
@@ -1053,7 +1252,7 @@ All detection parameters live in `config.py`. Edit once; every module picks up t
 | Parameter | Default | Description |
 |---|---|---|
 | `DEEPSORT_MAX_AGE` | `30` | Frames before a lost track is deleted |
-| `HISTORY_WINDOW_SECONDS` | `5` | Rolling history length per track |
+| `HISTORY_WINDOW_SECONDS` | `5` | Derives a fixed 50-observation scorer history at the legacy 10-FPS reference rate, not five measured source seconds |
 
 ### Accident scoring
 

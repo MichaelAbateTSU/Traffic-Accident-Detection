@@ -320,7 +320,7 @@ def _resize_frame(frame, max_frame_side: int | None):
 
 
 def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
-                  max_frame_side: int | None = None) -> dict:
+                  max_frame_side: int | None = None, experimental_constant_fps: bool = False) -> dict:
     import cv2
     from accident_scorer import AccidentScorer
     from pipeline import _overlay_score, _run_yolo
@@ -328,7 +328,11 @@ def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
 
     started = time.monotonic()
     # Only the image and prior predictions reach these stateful components.
-    tracker, scorer = DeepSortTracker(), AccidentScorer()
+    tracker = DeepSortTracker()
+    scorer = (
+        AccidentScorer() if not experimental_constant_fps
+        else AccidentScorer(timebase="experimental_constant_fps", source_fps=clip.fps)
+    )
     folder = output / clip.clip_id
     folder.mkdir()
     if save_frames:
@@ -408,7 +412,8 @@ def evaluate_clip(clip: Clip, model, output: Path, save_frames: bool = False,
 def evaluate(manifest_path: Path, output: Path, split: str = "test",
              max_frames: int = 3000, max_total_frames: int = 6000,
              model_path: str = config.YOLO_MODEL, seed: int = 0,
-             save_frames: bool = False, max_frame_side: int | None = None) -> dict:
+             save_frames: bool = False, max_frame_side: int | None = None,
+             experimental_constant_fps: bool = False) -> dict:
     manifest = load_manifest(manifest_path)
     clips = [clip for clip in manifest.clips if clip.split == split]
     if not clips:
@@ -467,7 +472,12 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
         "limitations": [
             "COCO YOLO detects vehicles, not accident classes.",
             "Thresholds are fixed from config; no fitting or calibration on evaluation labels.",
-            "Kinematics and most temporal thresholds use pixels/frame, not FPS-normalized units.",
+            (
+                "Experimental scorer trusts manifest constant FPS; nominal decoder FPS is not verified timing. "
+                "VFR/dropped frames and DeepSORT observation-based timing remain unsupported limitations."
+                if experimental_constant_fps
+                else "Kinematics and most temporal thresholds use pixels/frame, not FPS-normalized units."
+            ),
             "Small selected clips are a smoke evaluation, not an accuracy benchmark.",
             "Normal pre-event segments are not independent normal-driving videos.",
             "Unknown labels exclude frame observations and make continuous temporal metrics unavailable.",
@@ -477,13 +487,20 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
             "Unknown annotation index bases leave the onset-frame score undefined.",
         ],
     }
+    if experimental_constant_fps:
+        provenance["scorer_timebase"] = "experimental_constant_fps"
     # Partial output is explicitly marked running/failed, never a completed result.
     report_path = output / "summary.json"
     report = {"status": "running", "provenance": provenance, "clips": []}
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     try:
         for clip in clips:
-            report["clips"].append(evaluate_clip(clip, model, output, save_frames, max_frame_side))
+            if experimental_constant_fps:
+                result = evaluate_clip(clip, model, output, save_frames, max_frame_side,
+                                       experimental_constant_fps=True)
+            else:
+                result = evaluate_clip(clip, model, output, save_frames, max_frame_side)
+            report["clips"].append(result)
         report.update(status="complete", metrics=aggregate_metrics(report["clips"]),
                       elapsed_seconds=time.monotonic() - started,
                       actual_torch_threads=torch.get_num_threads())
@@ -505,13 +522,15 @@ def main():
     parser.add_argument("--max-total-frames", type=int, default=6000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save-labeled-frames", action="store_true")
+    parser.add_argument("--experimental-constant-fps", action="store_true",
+                        help="Opt in to experimental scorer timing, trusting each manifest's constant FPS")
     parser.add_argument("--max-frame-side", type=int,
                         help="Downscale before detection/tracking; production uses 1280")
     args = parser.parse_args()
     try:
         report = evaluate(args.manifest, args.output, args.split, args.max_frames,
                           args.max_total_frames, args.model, args.seed, args.save_labeled_frames,
-                          args.max_frame_side)
+                          args.max_frame_side, args.experimental_constant_fps)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.exit(1, f"Evaluation failed: {exc}\n")
     print(json.dumps(report["metrics"], indent=2))

@@ -6,7 +6,7 @@ How it works
 For every frame, call AccidentScorer.update(tracks, frame_idx).
 
 Internally the scorer maintains a per-track history deque of TrackSnapshot
-objects covering the last HISTORY_WINDOW_FRAMES frames.  Five heuristic
+objects covering the last HISTORY_WINDOW_FRAMES observations by default. Five heuristic
 signals are computed from that history:
 
     1. sudden_stop       – speed drops and stays near-zero for several frames
@@ -27,6 +27,18 @@ Public API
     score    : float  – smoothed accident confidence in [0, 1]
     detected : bool   – True once score > HIGH_THRESHOLD, cleared below LOW_THRESHOLD
     metadata : dict   – {frame_idx, involved_track_ids, event_region, signal_values}
+
+Experimental constant-FPS timebase
+---------------------------------
+    AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
+
+The caller explicitly trusts a finite positive constant source rate <=240 FPS. Capture
+FPS is only nominal; this mode does not infer timing, resample tracks, or support
+variable-rate/dropped-frame streams with unknown source indices. Source indices
+must be nonnegative strictly increasing integers. Motion is measured in the
+unchanged 10-FPS configuration's reference units; windows and EMAs use reference
+time. Missing observations restart motion evidence and receive no synthetic
+positive score evidence. See README for boundaries and tracker limitations.
 """
 
 import math
@@ -46,7 +58,7 @@ import config
 @dataclass
 class TrackSnapshot:
     """One frame's state for a single tracked vehicle."""
-    frame_idx: int
+    frame_idx: int | float  # Source index in legacy mode; reference ticks experimentally.
     cx: float          # Bounding-box centre x (pixels)
     cy: float          # Bounding-box centre y (pixels)
     area: float        # Bounding-box area (pixels²)
@@ -68,7 +80,8 @@ class _TrackRecord:
     history: deque = field(
         default_factory=lambda: deque(maxlen=config.HISTORY_WINDOW_FRAMES)
     )
-    last_seen_frame: int = -1
+    last_seen_frame: int | float = -1
+    last_seen_source_frame: int = -1
     # Smoothed velocity for incremental EMA update
     _ema_vx: Optional[float] = None
     _ema_vy: Optional[float] = None
@@ -85,14 +98,38 @@ class AccidentScorer:
     continuous accident confidence score.
     """
 
-    def __init__(self):
+    def __init__(self, *, timebase: str = "legacy", source_fps: float | None = None):
+        if timebase not in {"legacy", "experimental_constant_fps"}:
+            raise ValueError("Unknown scorer timebase")
+        self._experimental = timebase == "experimental_constant_fps"
+        if self._experimental:
+            if (isinstance(source_fps, bool) or not isinstance(source_fps, (int, float))
+                    or source_fps <= 0):
+                raise ValueError("Experimental constant-FPS scoring requires a finite positive trusted source_fps")
+            try:
+                source_fps = float(source_fps)
+            except OverflowError as exc:
+                raise ValueError("source_fps exceeds the finite timing range") from exc
+            if not math.isfinite(source_fps):
+                raise ValueError("Experimental constant-FPS scoring requires a finite positive trusted source_fps")
+            if source_fps > 240:
+                raise ValueError("Experimental source_fps must not exceed the supported 240 FPS ceiling")
+            self._reference_step = config.ASSUMED_FPS / source_fps
+            if not math.isfinite(self._reference_step) or self._reference_step <= 0:
+                raise ValueError("source_fps must have a representable reference-frame interval")
+        else:
+            if source_fps is not None:
+                raise ValueError("source_fps requires the experimental_constant_fps timebase")
+            self._reference_step = 1.0
+        self.source_fps = source_fps
+        self._last_source_frame: int | None = None
         self._records: dict[int, _TrackRecord] = defaultdict(_TrackRecord)
         self._smoothed_score: float = 0.0
         self._accident_detected: bool = False
 
         # Track the most recent collision event for post-collision scoring
         # Maps frozenset({tid_a, tid_b}) → frame_idx of last overlap
-        self._collision_events: dict[frozenset, int] = {}
+        self._collision_events: dict[frozenset, int | float] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -109,7 +146,8 @@ class AccidentScorer:
         Parameters
         ----------
         tracks    : confirmed track list from DeepSortTracker.update()
-        frame_idx : monotonically increasing frame counter
+        frame_idx : monotonically increasing source frame counter; experimental
+                    mode requires integers and uses gaps as missing evidence
 
         Returns
         -------
@@ -119,6 +157,28 @@ class AccidentScorer:
             metadata         : dict with keys
                 frame_idx, involved_track_ids, event_region, signal_values
         """
+        source_frame_idx = frame_idx
+        score_elapsed = 1.0
+        if self._experimental:
+            if (isinstance(frame_idx, bool) or not isinstance(frame_idx, int) or frame_idx < 0
+                    or (self._last_source_frame is not None and frame_idx <= self._last_source_frame)):
+                raise ValueError("Experimental source frame indices must be nonnegative integers and strictly increase")
+            try:
+                reference_frame_idx = frame_idx * self._reference_step
+            except OverflowError as exc:
+                raise ValueError("Source frame index exceeds the experimental timebase range") from exc
+            if not math.isfinite(reference_frame_idx):
+                raise ValueError("Source frame index exceeds the experimental timebase range")
+            if self._last_source_frame is not None:
+                score_elapsed = (frame_idx - self._last_source_frame) * self._reference_step
+            else:
+                score_elapsed = self._reference_step
+            frame_idx = reference_frame_idx
+            self._last_source_frame = source_frame_idx
+            if score_elapsed > self._reference_step:
+                self._smoothed_score *= (1 - config.EMA_ALPHA) ** (score_elapsed - self._reference_step)
+                score_elapsed = self._reference_step
+
         # 1. Ingest new snapshots
         self._ingest(tracks, frame_idx)
 
@@ -139,7 +199,7 @@ class AccidentScorer:
         raw_score = float(np.clip(raw_score, 0.0, 1.0))
 
         # 5. EMA smoothing
-        alpha = config.EMA_ALPHA
+        alpha = self._ema_alpha(config.EMA_ALPHA, score_elapsed)
         self._smoothed_score = (
             alpha * raw_score + (1.0 - alpha) * self._smoothed_score
         )
@@ -153,12 +213,15 @@ class AccidentScorer:
         # 7. Build metadata
         involved, event_region = self._find_event_focus(signals, frame_idx)
         metadata = {
-            "frame_idx": frame_idx,
+            "frame_idx": source_frame_idx,
             "involved_track_ids": involved,
             "event_region": event_region,
             "signal_values": signals,
             "raw_score": round(raw_score, 4),
         }
+        if self._experimental:
+            metadata["timebase"] = "experimental_constant_fps"
+            metadata["source_fps"] = self.source_fps
 
         return round(self._smoothed_score, 4), self._accident_detected, metadata
 
@@ -168,14 +231,45 @@ class AccidentScorer:
         self._smoothed_score = 0.0
         self._accident_detected = False
         self._collision_events.clear()
+        self._last_source_frame = None
+
+    def _ema_alpha(self, alpha: float, elapsed: float) -> float:
+        if not self._experimental or elapsed == 1:
+            return alpha
+        return -math.expm1(elapsed * math.log1p(-alpha))
+
+    def _recent(self, rec: _TrackRecord, frames: int) -> list[TrackSnapshot]:
+        history = list(rec.history)
+        if not self._experimental:
+            return history[-frames:]
+        cutoff = history[-1].frame_idx - (frames - 1)
+        start = next((idx for idx, snap in enumerate(history)
+                      if snap.frame_idx >= cutoff - 1e-9), len(history) - 1)
+        if start > 0 and history[start].frame_idx > cutoff + 1e-9:
+            start -= 1
+        return history[start:]
+
+    def _has_duration(self, history: list[TrackSnapshot], frames: int) -> bool:
+        return bool(history) and history[-1].frame_idx - history[0].frame_idx >= frames - 1 - 1e-9
+
+    def _observed_now(self, rec: _TrackRecord) -> bool:
+        return (not self._experimental or self._last_source_frame is None
+                or rec.last_seen_source_frame == self._last_source_frame)
 
     # ------------------------------------------------------------------
     # History ingestion
     # ------------------------------------------------------------------
 
-    def _ingest(self, tracks: list, frame_idx: int):
+    def _ingest(self, tracks: list, frame_idx: int | float):
         """Convert DeepSORT track objects into TrackSnapshots and store them."""
         for track in tracks:
+            if self._experimental:
+                age = getattr(track, "time_since_update", None)
+                if age is not None:
+                    if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+                        raise ValueError("Track time_since_update must be a nonnegative integer")
+                    if age > 0:
+                        continue
             tid = track.track_id
             x1, y1, x2, y2 = [float(v) for v in track.to_tlbr()]
             cx = (x1 + x2) / 2.0
@@ -183,6 +277,15 @@ class AccidentScorer:
             area = max(0.0, (x2 - x1) * (y2 - y1))
 
             rec = self._records[tid]
+            if self._experimental:
+                # A missing source observation breaks evidence, not a synthetic
+                # stationary interval. Restart this track's motion estimation.
+                if (rec.history and self._last_source_frame is not None
+                        and rec.last_seen_source_frame != self._last_source_frame - 1):
+                    rec = _TrackRecord()
+                    self._records[tid] = rec
+                if rec.history.maxlen is not None:
+                    rec.history = deque(rec.history)
 
             # Velocity estimation via EMA
             if rec._ema_vx is None:
@@ -194,7 +297,7 @@ class AccidentScorer:
                     raise ValueError("Track frame indices must increase monotonically")
                 raw_vx = (cx - rec.history[-1].cx) / dt
                 raw_vy = (cy - rec.history[-1].cy) / dt
-                alpha_v = 0.4  # velocity EMA (faster than score EMA)
+                alpha_v = self._ema_alpha(0.4, dt)
                 vx = alpha_v * raw_vx + (1.0 - alpha_v) * rec._ema_vx
                 vy = alpha_v * raw_vy + (1.0 - alpha_v) * rec._ema_vy
                 decel_speed = (
@@ -219,15 +322,21 @@ class AccidentScorer:
                 decel_speed=decel_speed,
             )
             rec.history.append(snap)
+            if self._experimental:
+                cutoff = frame_idx - (config.HISTORY_WINDOW_FRAMES - 1)
+                while len(rec.history) > 1 and rec.history[1].frame_idx <= cutoff + 1e-9:
+                    rec.history.popleft()
             rec.last_seen_frame = frame_idx
+            if self._experimental and self._last_source_frame is not None:
+                rec.last_seen_source_frame = self._last_source_frame
             rec._ema_vx = vx
             rec._ema_vy = vy
             rec._ema_speed = decel_speed
 
-    def _purge_stale(self, frame_idx: int):
+    def _purge_stale(self, frame_idx: int | float):
         stale = [
             tid for tid, rec in self._records.items()
-            if frame_idx - rec.last_seen_frame > config.GRACE_PERIOD_FRAMES
+            if frame_idx - rec.last_seen_frame > config.GRACE_PERIOD_FRAMES + (1e-9 if self._experimental else 0)
         ]
         for tid in stale:
             del self._records[tid]
@@ -236,7 +345,7 @@ class AccidentScorer:
     # Signal computation
     # ------------------------------------------------------------------
 
-    def _compute_signals(self, frame_idx: int) -> dict[str, float]:
+    def _compute_signals(self, frame_idx: int | float) -> dict[str, float]:
         sudden_stop    = self._signal_sudden_stop()
         abrupt_decel   = self._signal_abrupt_decel()
         collision, col_pairs = self._signal_collision_iou(frame_idx)
@@ -258,25 +367,22 @@ class AccidentScorer:
         Returns the fraction of tracks that have been near-stationary for at
         least STOP_MIN_FRAMES frames.  Clipped to [0, 1].
         """
-        threshold = config.STOP_SPEED_THRESHOLD
-        min_frames = config.STOP_MIN_FRAMES
-
-        stopped_count = 0
-        eligible = 0
-
-        for rec in self._records.values():
-            if len(rec.history) < min_frames:
-                continue
-            eligible += 1
-            recent = list(rec.history)[-min_frames:]
-            if all(s.speed < threshold for s in recent):
-                stopped_count += 1
-
-        if eligible == 0:
-            return 0.0
+        stopped_count = sum(self._contributes_sudden_stop(rec) for rec in self._records.values())
         # Normalise: 1 stopped vehicle out of N = partial signal
         # Full signal (1.0) when ≥2 vehicles are stopped simultaneously
         return min(1.0, stopped_count / 2.0)
+
+    def _contributes_sudden_stop(self, rec: _TrackRecord) -> bool:
+        if not self._observed_now(rec):
+            return False
+        min_frames = config.STOP_MIN_FRAMES
+        recent = self._recent(rec, min_frames) if rec.history else []
+        if self._experimental:
+            if not self._has_duration(recent, min_frames):
+                return False
+        elif len(rec.history) < min_frames:
+            return False
+        return all(s.speed < config.STOP_SPEED_THRESHOLD for s in recent)
 
     # ---- Signal 2: Abrupt deceleration --------------------------------
 
@@ -291,9 +397,11 @@ class AccidentScorer:
 
         max_signal = 0.0
         for rec in self._records.values():
+            if not self._observed_now(rec):
+                continue
             if len(rec.history) < 2:
                 continue
-            recent = list(rec.history)[-w:]
+            recent = self._recent(rec, w)
             if len(recent) < 2:
                 continue
             elapsed = recent[-1].frame_idx - recent[0].frame_idx
@@ -312,7 +420,7 @@ class AccidentScorer:
     # ---- Signal 3: Collision / box overlap ----------------------------
 
     def _signal_collision_iou(
-        self, frame_idx: int
+        self, frame_idx: int | float
     ) -> tuple[float, list[tuple[int, int]]]:
         """
         Returns (signal_value, list_of_colliding_pairs).
@@ -338,6 +446,8 @@ class AccidentScorer:
 
                 snap_a = rec_a.history[-1]
                 snap_b = rec_b.history[-1]
+                if not self._observed_now(rec_a) or not self._observed_now(rec_b):
+                    continue
 
                 iou = _compute_iou(
                     (snap_a.x1, snap_a.y1, snap_a.x2, snap_a.y2),
@@ -369,16 +479,25 @@ class AccidentScorer:
 
         return max_signal, colliding_pairs
 
-    @staticmethod
     def _were_converging(
+        self,
         rec_a: _TrackRecord,
         rec_b: _TrackRecord,
         n: int,
     ) -> bool:
         """Return True if the inter-centre distance was monotonically (or
         mostly) shrinking over the last n shared frames."""
-        hist_a = list(rec_a.history)
-        hist_b = list(rec_b.history)
+        hist_a = self._recent(rec_a, n)
+        hist_b = self._recent(rec_b, n)
+        if self._experimental:
+            by_frame_b = {snap.frame_idx: snap for snap in hist_b}
+            shared_pairs = [(snap, by_frame_b[snap.frame_idx]) for snap in hist_a
+                            if snap.frame_idx in by_frame_b]
+            dists = [math.hypot(a.cx - b.cx, a.cy - b.cy) for a, b in shared_pairs]
+            if len(dists) < 2:
+                return False
+            decreasing = sum(dists[k] < dists[k - 1] for k in range(1, len(dists)))
+            return decreasing >= (len(dists) - 1) * 0.6
         shared = min(len(hist_a), len(hist_b), n)
         if shared < 2:
             return False
@@ -398,7 +517,7 @@ class AccidentScorer:
 
     def _signal_post_collision(
         self,
-        frame_idx: int,
+        frame_idx: int | float,
         col_pairs: list[tuple[int, int]],
     ) -> float:
         """
@@ -417,7 +536,7 @@ class AccidentScorer:
         # Past collisions: check if involved tracks are still anomalous
         expired = []
         for pair_key, event_frame in self._collision_events.items():
-            if frame_idx - event_frame > window:
+            if frame_idx - event_frame > window + (1e-9 if self._experimental else 0):
                 expired.append(pair_key)
                 continue
             for tid in pair_key:
@@ -426,6 +545,11 @@ class AccidentScorer:
                 rec = self._records[tid]
                 if len(rec.history) < 3:
                     continue
+                if self._experimental and (
+                    not self._observed_now(rec)
+                    or not self._has_duration(list(rec.history), 3)
+                ):
+                    continue
 
                 last = rec.history[-1]
                 # Post-collision stationary
@@ -433,9 +557,9 @@ class AccidentScorer:
                     max_signal = max(max_signal, 0.8)
 
                 # Post-collision erratic direction change
-                recent = list(rec.history)[-5:]
+                recent = self._recent(rec, 5)
                 if len(recent) >= 3:
-                    angle = _direction_change_deg(recent)
+                    angle = self._direction_change(recent)
                     if angle > direction_thresh:
                         normalised = min(1.0, angle / 180.0)
                         max_signal = max(max_signal, 0.5 + 0.5 * normalised)
@@ -444,6 +568,17 @@ class AccidentScorer:
             del self._collision_events[k]
 
         return max_signal
+
+    def _direction_change(self, recent: list[TrackSnapshot]) -> float:
+        if not self._experimental:
+            return _direction_change_deg(recent)
+        max_angle = 0.0
+        for idx, last in enumerate(recent):
+            previous = next((snap for snap in reversed(recent[:idx])
+                             if last.frame_idx - snap.frame_idx >= 1 - 1e-9), None)
+            if previous is not None:
+                max_angle = max(max_angle, _direction_change_deg([previous, last]))
+        return max_angle
 
     # ---- Signal 5: Traffic anomaly (nearby vehicles slowing) ----------
 
@@ -468,6 +603,10 @@ class AccidentScorer:
 
         slow_nearby = 0
         for rec in self._records.values():
+            if not self._observed_now(rec):
+                continue
+            if self._experimental and len(rec.history) < 2:
+                continue
             if not rec.history:
                 continue
             snap = rec.history[-1]
@@ -511,7 +650,7 @@ class AccidentScorer:
     def _find_event_focus(
         self,
         signals: dict[str, float],
-        frame_idx: int,
+        frame_idx: int | float,
     ) -> tuple[list[int], Optional[tuple]]:
         """
         Return (involved_track_ids, event_region_bbox) for the metadata dict.
@@ -529,7 +668,8 @@ class AccidentScorer:
         if not involved_tids:
             # Fall back: find the slowest track as focal point
             slowest = min(
-                self._records.items(),
+                ((tid, rec) for tid, rec in self._records.items()
+                 if not self._experimental or self._contributes_sudden_stop(rec)),
                 key=lambda kv: kv[1].history[-1].speed if kv[1].history else 1e9,
                 default=(None, None),
             )
