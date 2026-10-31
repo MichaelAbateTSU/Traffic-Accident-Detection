@@ -102,6 +102,33 @@ def test_nine_camera_batch_is_accepted_pending_then_runs_fifo(queued_client):
     wait_for(lambda: not client.app.state.detection_queue._futures)
 
 
+def test_opt_in_labeled_source_preserves_149_frame_bound(queued_client, monkeypatch):
+    client, store, started, release, _ = queued_client
+    source = (
+        "https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/"
+        "main/assets/videos/real-world/single%20(3).mp4"
+    )
+    assert client.post("/detect-accident", json={"stream_url": source, "max_frames": 149}).status_code == 403
+    monkeypatch.setattr(settings, "approved_stream_urls", [source])
+    response = client.post("/detect-accident", json={
+        "stream_url": source, "max_frames": 149, "save_frames": True,
+    })
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert started.wait(2)
+    release.set()
+    wait_for(lambda: store.get(job_id).status == "complete")
+    result = store.get(job_id)
+    assert result.max_frames == result.frames_processed == 149 and result.save_frames
+
+
+@pytest.mark.parametrize("max_frames", [0, 301, True, 149.0, "149"])
+def test_production_rejects_invalid_frame_bounds_before_queue_admission(queued_client, max_frames):
+    client, store, _, _, _ = queued_client
+    response = client.post("/detect-accident", json={"stream_url": SOURCES[0], "max_frames": max_frames})
+    assert response.status_code == 422 and not store.all_jobs()
+
+
 def test_queue_overflow_is_explicit_and_does_not_create_a_job(queued_client):
     client, store, started, release, observed = queued_client
     accepted = [submit(client, source) for source in SOURCES[:10]]

@@ -12,6 +12,11 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
+def tunnel_lifetime_seconds(job_timeout_seconds: int) -> int:
+    if not 1 <= job_timeout_seconds <= 3600:
+        raise ValueError("JOB_TIMEOUT_SECONDS must be within 1-3600")
+    return job_timeout_seconds + 30
+
 
 def resolve_public(host: str, port: int, allowed_hosts: set[str]) -> list[tuple]:
     if host.lower() not in allowed_hosts or port != 443:
@@ -71,10 +76,12 @@ class ProxyHandler(socketserver.StreamRequestHandler):
             return
         with upstream:
             self.connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            deadline = time.monotonic() + 300
+            deadline = time.monotonic() + self.server.tunnel_lifetime
             try:
                 while time.monotonic() < deadline:
-                    readable, _, _ = select.select([self.connection, upstream], [], [], 10)
+                    readable, _, _ = select.select(
+                        [self.connection, upstream], [], [], max(0, min(10, deadline - time.monotonic())),
+                    )
                     if not readable:
                         logger.warning("Closing idle proxy tunnel")
                         return
@@ -94,8 +101,11 @@ class ProxyServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address: tuple, allowed_hosts: set[str]) -> None:
+    def __init__(
+        self, address: tuple, allowed_hosts: set[str], *, job_timeout_seconds: int = 300,
+    ) -> None:
         self.allowed_hosts = allowed_hosts
+        self.tunnel_lifetime = tunnel_lifetime_seconds(job_timeout_seconds)
         self.slots = threading.BoundedSemaphore(16)
         super().__init__(address, ProxyHandler)
 
@@ -117,5 +127,8 @@ if __name__ == "__main__":
     hosts = {host.strip().lower() for host in os.environ.get("STREAM_HOSTS", "").split(",") if host.strip()}
     if not hosts:
         raise SystemExit("STREAM_HOSTS must explicitly list approved camera/CDN hosts")
-    with ProxyServer(("0.0.0.0", 3128), hosts) as server:
+    with ProxyServer(
+        ("0.0.0.0", 3128), hosts,
+        job_timeout_seconds=int(os.environ.get("JOB_TIMEOUT_SECONDS", "300")),
+    ) as server:
         server.serve_forever()

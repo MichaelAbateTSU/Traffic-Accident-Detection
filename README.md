@@ -217,7 +217,7 @@ Start an accident detection job against a stream URL.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `stream_url` | string (URL) | required | Any source OpenCV can open: HLS, RTSP, MP4 |
-| `max_frames` | integer | `300` | Frame cap (~10 s at 30 fps). Range: 1–18000 |
+| `max_frames` | strict integer | `5` | Process 1-300 ordered frames; request a longer sequence for temporal scoring. Processing time is hardware/scene-dependent |
 | `save_frames` | boolean | `false` | Save raw and annotated images to `pipeline_output/` and publish frame URLs; when false, no images are written or published |
 
 **Response `202 Accepted`:**

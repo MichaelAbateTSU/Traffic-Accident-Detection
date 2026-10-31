@@ -52,7 +52,12 @@ def smoke_runtime(monkeypatch):
             payload = {
                 "status": "pending" if state["pending"] else "complete",
                 "frames_processed": 5,
-                "frames": [{"capture": f"https://api.example.com/artifacts/{job_id}/frame.jpg"}],
+                "peak_confidence": 0.25,
+                "accident_detected": False,
+                "frames": [{
+                    kind: f"https://api.example.com/artifacts/{job_id}/{kind}.jpg"
+                    for kind in ("capture", "capture_annotated", "pipeline_output")
+                }],
             }
         else:
             assert path.startswith("/artifacts/")

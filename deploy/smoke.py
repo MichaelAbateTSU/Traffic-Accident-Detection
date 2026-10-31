@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--stream-url")
     parser.add_argument("--existing-job")
     parser.add_argument("--batch-size", type=int, default=1, choices=range(1, 10))
+    parser.add_argument("--max-frames", type=int, default=5, choices=range(1, 301), metavar="1-300")
     parser.add_argument("--ca-file")
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     args = parser.parse_args()
@@ -76,7 +77,7 @@ def main() -> None:
         job_ids = []
         for _ in range(args.batch_size):
             status, _, body = request("/detect-accident", method="POST", payload={
-                "stream_url": args.stream_url, "max_frames": 5, "save_frames": True,
+                "stream_url": args.stream_url, "max_frames": args.max_frames, "save_frames": True,
             }, timeout=min(30, remaining_wait()))
             assert status == 202, (status, body)
             job_ids.append(json.loads(body)["job_id"])
@@ -93,15 +94,19 @@ def main() -> None:
             time.sleep(min(1, remaining_wait()))
         assert job["frames_processed"] > 0 and job["frames"], job
         results.append({"job_id": job_id, "status": job["status"],
-                        "frames_processed": job["frames_processed"]})
+                        "frames_processed": job["frames_processed"],
+                        "peak_confidence": job["peak_confidence"],
+                        "accident_detected": job["accident_detected"]})
     # Fetch after the entire batch completes, so premature pruning cannot pass.
     for job_id in job_ids:
         _, _, body = request(f"/jobs/{job_id}")
-        artifact = json.loads(body)["frames"][0]["capture"]
-        artifact_path = urllib.parse.urlsplit(artifact).path
-        assert request(artifact_path, authenticated=False)[0] == 401
-        status, _, image = request(artifact_path)
-        assert status == 200 and image[:2] == b"\xff\xd8", (status, image[:100])
+        frames = json.loads(body)["frames"]
+        for frame in (frames[0], frames[-1]):
+            for kind in ("capture", "capture_annotated", "pipeline_output"):
+                artifact_path = urllib.parse.urlsplit(frame[kind]).path
+                assert request(artifact_path, authenticated=False)[0] == 401
+                status, _, image = request(artifact_path)
+                assert status == 200 and image[:2] == b"\xff\xd8", (status, image[:100])
     result = results[0] if len(results) == 1 else {"jobs": results}
     print(json.dumps(result | {"https_smoke": "passed"}))
 

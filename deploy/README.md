@@ -12,7 +12,7 @@ change that. Supply an authorized existing free VM, its SSH access and a DNS nam
 before deploying. An account may exist elsewhere; absent configuration is not
 evidence that the user has no account.
 
-Verified on this workspace's **amd64** Docker host: 142 tests with the real
+Verified on this workspace's **amd64** Docker host: 157 tests with the real
 locked ML dependencies, certificate-verified HTTPS inference over the isolated
 proxy, authenticated JPEG retrieval, private/metadata egress rejection, and
 preserved results/images after API restart and recreation, including a
@@ -42,8 +42,13 @@ inference server free or always available.
 
 Use an existing DNS name or an appropriately authorized free dynamic-DNS name;
 buying a domain is not required by the runtime. Point its A record at the VM and
-remove an AAAA record unless IPv6 actually reaches this stack. Docker Engine
-with Compose v2 and outbound DNS/HTTPS are required. Allow inbound TCP 80/443
+remove an AAAA record unless IPv6 actually reaches this stack.
+An optional no-account DNS alternative is an IP-embedded hostname such as
+`YOUR-PUBLIC-IP-WITH-HYPHENS.sslip.io`; [sslip.io](https://sslip.io/) documents
+Caddy/HTTP-01 use. This is a third-party DNS dependency with no uptime guarantee,
+not a provisioned backend. The VM still needs a stable public IP and reachable
+ports 80/443; ACME issuance on the eventual VM remains unverified.
+Docker Engine with Compose v2 and outbound DNS/HTTPS are required. Allow inbound TCP 80/443
 in the VM firewall and cloud security rules; restrict SSH to operator IPs.
 Do **not** open 8000 or 3128. Leave Docker's isolation/firewall rules enabled.
 Enable Docker's system service on the VM so `restart: unless-stopped` also works
@@ -136,6 +141,80 @@ Redirects and segment URLs must pass this same boundary. Do not attach the API
 to an internet network or publish/bypass the proxy. An unapproved URL returns
 403; an unreachable/unapproved downstream host fails the job explicitly.
 
+## Opt-in labeled research video
+
+For **noncommercial research only**, an authorized operator can explicitly add
+the ACCIDENT authors' individual public previews to the private deployment env.
+These are not included in the default production camera registry and are not
+bundled in this repository/image. Attribute **Picek et al., ACCIDENT (2026)**,
+the [paper](https://arxiv.org/abs/2604.09819),
+[author preview repository](https://github.com/accidentbench/accidentbench.github.io)
+and [official Kaggle dataset](https://www.kaggle.com/datasets/picekl/accident).
+The dataset is **CC BY-NC-SA 4.0**: review current terms, provide attribution,
+respect the noncommercial restriction and applicable share-alike obligations.
+Do not treat this opt-in as commercial deployment clearance.
+
+For a research-only deployment with these two sources, use these exact values;
+to retain the live cameras, append the URLs/hostname to their existing lists:
+
+```ini
+APPROVED_STREAM_URLS=["https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/main/assets/videos/real-world/tbone%20(3).mp4","https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/main/assets/videos/real-world/single%20(3).mp4"]
+STREAM_HOSTS=media.githubusercontent.com
+```
+
+Recreate the API **and egress proxy** after editing the private env file, without
+deleting data volumes:
+
+```sh
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d
+python3 deploy/smoke.py https://YOUR_API_DOMAIN \
+  --stream-url 'https://media.githubusercontent.com/media/accidentbench/accidentbench.github.io/main/assets/videos/real-world/single%20(3).mp4' \
+  --max-frames 149
+```
+
+The API now accepts a strict integer `max_frames` of **1-300**, default **5**.
+For `single (3).mp4` / `eQvvIoDMXzY_00.mp4`, request **at least 149 frames**
+to include zero-based index 148, the CSV's recorded onset frame. Five or 120
+frames do not reach that frame. The CSV is onset-only metadata, not a complete
+frame-level accident interval; retain its indexing/time fields without
+inventing accident-end labels. For `tbone (3).mp4` / `e17Wq4Hpqlk_02.mp4`,
+the CSV says head-on with onset frame 18, despite the preview filename/category.
+Process the full ordered sequence; do not feed ground-truth labels or
+pre-annotated boxes into YOLO.
+
+`save_frames: true` preserves indexed triplets: raw `capture`, tracked
+`capture_annotated`, and score-overlaid `pipeline_output`. The smoke retrieves
+all three at the first and last saved indexes using the operator bearer token,
+and prints `peak_confidence` and `accident_detected`.
+The peak is a **heuristic**, not a calibrated accident probability; YOLO
+detects vehicles, and temporal tracking/scoring estimates accident-like motion.
+An author-labeled collision can produce no alarm. Overlay annotations are
+model outputs, not ground-truth accident labels. The API event timestamp is
+processing elapsed time, not media time; compare labels using frame index/FPS
+in the separate offline evaluator. Saved images remain subject to retention
+and the dataset's restrictions; do not redistribute them as cleared examples.
+
+On 2026-10-31, the actual isolated amd64 Docker stack opened both author-hosted
+HTTPS videos through the allowlisted proxy, authenticated each request, ran
+the baked `yolo11n.pt` plus DeepSORT/scorer with 1280-side `INTER_LINEAR`
+preprocessing and two CPU threads, and retrieved all three first/last JPEG
+variants. Each job saved **149 indexed triplets (447 JPEGs), indexes 0-148**.
+Decoded `pipeline_output/000148.jpg` differed from its tracking-only counterpart,
+confirming the score-overlay output was produced.
+
+| Opt-in author preview | Frames | Peak heuristic score | Alarm | Observed elapsed |
+|---|---:|---:|---|---:|
+| `single (3).mp4` | 149 | 0.2500 | No | 38.7 s |
+| `tbone (3).mp4` | 149 | 0.6990 | Yes; first index 58 | 48.6 s |
+
+Elapsed time is job creation to completion on this workspace host, including
+decode/tracking/image writes; it is not Oracle ARM performance. The single
+preview's prefix only reaches its CSV onset frame at the end, so no alarm is
+not proof of a normal clip. The t-bone/head-on preview is one positive sample,
+not a sensitivity/false-positive benchmark. The score is not calibrated and
+depends on model/preprocessing/runtime/scene; do not substitute it for a safety
+decision. These authenticated local-stack checks are **not a public deployment**.
+
 ## Bounds, persistence and verification
 
 The production shared model executes **one job at a time** with FIFO admission
@@ -147,7 +226,16 @@ and an outstanding-job cap of ten.
 The API container has 2 CPUs, 4 GB RAM, 128 PIDs, a read-only root filesystem,
 a non-root UID and no Linux capabilities. Uvicorn admits at most 32 simultaneous
 HTTP tasks/connections, and Caddy caps request bodies at 16 KB.
+Production registers an `on_predict_start` thread-budget callback because
+Ultralytics resets PyTorch CPU threads during first predictor device selection.
+The configured two-thread count is reapplied before first/repeated prediction
+inference; development models are not modified by this production-only callback.
 Video open/read timeout is 10 seconds;
+the proxy uses the same `JOB_TIMEOUT_SECONDS` setting with a 30-second
+read/inference margin (330 seconds by default, bounded at 3630 seconds).
+Its ten-second idle timeout and 16-connection limit remain independent
+protections. Changing the deadline recreates both API and egress services;
+do not configure different values or leave an older proxy running.
 the production 300-second deadline starts **when execution begins**, not while waiting in
 the queue, and is checked between frames, so a single read/inference
 can overshoot it. Frames larger than 1280 pixels on their longest edge are

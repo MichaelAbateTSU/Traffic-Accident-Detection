@@ -218,3 +218,16 @@ def test_production_video_requires_proxy_and_approved_source(monkeypatch):
     monkeypatch.delenv("http_proxy", raising=False)
     with pytest.raises(RuntimeError, match="egress proxy"):
         open_production_video(SOURCE)
+
+
+@pytest.mark.parametrize("timeout,expected", [(1, 31), (300, 330), (900, 930), (3600, 3630)])
+def test_egress_tunnel_lifetime_tracks_job_deadline_with_bounded_margin(timeout, expected):
+    assert egress_proxy.tunnel_lifetime_seconds(timeout) == expected
+    with egress_proxy.ProxyServer(("127.0.0.1", 0), {"example.com"}, job_timeout_seconds=timeout) as server:
+        assert server.tunnel_lifetime == expected
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 3601, 10000])
+def test_egress_rejects_unsupported_deadlines(timeout):
+    with pytest.raises(ValueError, match="1-3600"):
+        egress_proxy.tunnel_lifetime_seconds(timeout)

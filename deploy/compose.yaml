@@ -60,6 +60,7 @@ services:
     pids_limit: 32
     environment:
       STREAM_HOSTS: ${STREAM_HOSTS:?List every approved camera and segment/CDN hostname}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-300}
     networks:
       private:
         ipv4_address: 172.30.0.4

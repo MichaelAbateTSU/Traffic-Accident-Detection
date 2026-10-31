@@ -74,7 +74,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Loading YOLO model: %s", model_path)
         app.state.model = YOLO(model_path)
         if settings.environment == "production":
-            app.state.model.to("cpu")
+            from app.core.inference import configure_production_model
+            configure_production_model(app.state.model)
         logger.info("YOLO model loaded successfully.")
     except Exception:
         logger.exception("Failed to load YOLO model — /detect-accident will return 503.")
