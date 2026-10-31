@@ -128,7 +128,7 @@ def _save_frame_triplet(
 
 def _prune_old_job_artifacts() -> None:
     """
-    Keep artifact folders for active jobs plus the N most recent terminal jobs.
+    Keep artifacts for active jobs plus the N most recent terminal jobs with images.
 
     This bounds disk usage while avoiding deletion of folders that may still be
     written by running/pending jobs.
@@ -144,7 +144,7 @@ def _prune_old_job_artifacts() -> None:
         if job.status in ("pending", "running")
     }
     terminal_jobs = sorted(
-        [job for job in all_jobs if job.status in ("complete", "failed")],
+        [job for job in all_jobs if job.status in ("complete", "failed") and job.frames],
         key=lambda job: job.completed_at or job.created_at,
         reverse=True,
     )
@@ -197,7 +197,8 @@ def run_detection_job(
     stream_url  : Any source accepted by cv2.VideoCapture — HLS, RTSP, MP4.
     max_frames  : Hard cap on frames processed (keeps response times bounded).
     model       : Pre-loaded YOLO model from app state (avoids reload per job).
-    save_frames : If True, annotated frames are written to pipeline_output/.
+    save_frames : If True, raw and annotated frames are saved and published.
+                  If False, no frame images are written or published.
     """
     logger.info("Job started  job_id=%s  stream_url=%s  max_frames=%d",
                 job_id, stream_url, max_frames)
@@ -241,23 +242,24 @@ def run_detection_job(
             score, detected, meta = scorer.update(tracks, frames_processed)
             # ----------------------------------------------------------
 
-            capture_annotated = tracker.draw_tracks(frame, tracks)
-            pipeline_output = capture_annotated
-            if pipeline_config.OVERLAY_SCORE:
-                from pipeline import _overlay_score
+            if save_frames:
+                capture_annotated = tracker.draw_tracks(frame, tracks)
+                pipeline_output = capture_annotated
+                if pipeline_config.OVERLAY_SCORE:
+                    from pipeline import _overlay_score
 
-                pipeline_output = _overlay_score(
-                    capture_annotated.copy(), score, detected, frames_processed
+                    pipeline_output = _overlay_score(
+                        capture_annotated.copy(), score, detected, frames_processed
+                    )
+                frame_images.append(
+                    _save_frame_triplet(
+                        job_id=job_id,
+                        frame_idx=frames_processed,
+                        frame=frame,
+                        capture_annotated=capture_annotated,
+                        pipeline_output=pipeline_output,
+                    )
                 )
-            frame_images.append(
-                _save_frame_triplet(
-                    job_id=job_id,
-                    frame_idx=frames_processed,
-                    frame=frame,
-                    capture_annotated=capture_annotated,
-                    pipeline_output=pipeline_output,
-                )
-            )
 
             if score > peak_confidence:
                 peak_confidence = score
@@ -309,7 +311,8 @@ def run_detection_job(
         frames=frame_images,
         completed_at=_utcnow(),
     )
-    _prune_old_job_artifacts()
+    if save_frames:
+        _prune_old_job_artifacts()
     logger.info(
         "Job complete  job_id=%s  frames=%d  accident=%s  peak=%.3f  events=%d",
         job_id, frames_processed, accident_detected, peak_confidence, len(events),
@@ -328,6 +331,6 @@ def _fail_job(job_id: str, error: str) -> None:
         error=error,
         completed_at=_utcnow(),
     )
-    _prune_old_job_artifacts()
-
-
+    job = job_store.get(job_id)
+    if job is not None and job.frames:
+        _prune_old_job_artifacts()

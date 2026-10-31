@@ -31,7 +31,10 @@ class DetectRequest(BaseModel):
     )
     save_frames: bool = Field(
         default=False,
-        description="Write annotated frames to pipeline_output/ on disk.",
+        description=(
+            "Save raw and annotated frame images to disk and publish their URLs. "
+            "When false, no frame images are saved or published."
+        ),
     )
 
 

@@ -43,7 +43,7 @@ class _StubDeepSort:
         pass
 
 
-_install_stub("cv2")
+_install_stub("cv2", VideoCapture=object)
 _install_stub("ultralytics", YOLO=_UnavailableYOLO)
 _install_stub("deep_sort_realtime")
 _install_stub("deep_sort_realtime.deepsort_tracker", DeepSort=_StubDeepSort)

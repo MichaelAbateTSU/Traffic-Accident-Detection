@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
@@ -21,7 +20,7 @@ from app.models.schemas import (
     JobStatusSummary,
     JobSummary,
 )
-from app.services.job_store import job_store
+from app.services.job_store import _extract_camera_id, job_store
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -60,24 +59,12 @@ def _absolute_frames(request: Request, frames: list) -> list:
     ]
 
 
-def _camera_id_from_url(stream_url: str) -> str:
-    parsed = urlparse(stream_url)
-    path = parsed.path.strip("/")
-    if path:
-        leaf = path.split("/")[-1]
-        if "." in leaf:
-            leaf = leaf.rsplit(".", 1)[0]
-        if leaf:
-            return leaf
-    return parsed.netloc or "unknown-camera"
-
-
 def _to_job_summary(job, request: Request) -> JobSummary:
     return JobSummary(
         job_id=job.job_id,
         status=job.status,
         stream_url=job.stream_url,
-        camera_id=_camera_id_from_url(job.stream_url),
+        camera_id=_extract_camera_id(job.stream_url),
         created_at=job.created_at,
         completed_at=job.completed_at,
         frames_processed=job.frames_processed,
