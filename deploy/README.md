@@ -61,6 +61,38 @@ obtained. This is a representative local resource-limit experiment, not a
 measurement on Render hardware; real camera decoding/resolution can need more
 resources, not less.
 
+### Bounded memory-reduction follow-up
+
+Further local experiments retained the same YOLO11n weights, genuine
+MobileNetV2 DeepSORT embedder, scorer and preprocessing, under the same
+0.1 CPU / 512 MiB / no-swap limits. These were disposable process-level
+experiments, **not enabled production settings**:
+
+| Experiment | Actual result |
+|---|---|
+| Disable PyTorch oneDNN/MKLDNN workspaces; retain two inference threads | One three-frame 720x1280 synthetic-source job completed at 60.7 seconds including startup; the second job OOM-killed the process at 80.7 seconds. Recorded cgroup peak reached the 536,870,912-byte limit. |
+| Also use one intra-op/inter-op/OpenCV/BLAS thread, `MALLOC_ARENA_MAX=1`, and `torch.inference_mode()` around the worker | Two three-frame 720x1280 synthetic-source jobs completed by 64.0 seconds including startup; indexed JPEGs decoded successfully, and genuine re-ID inference on two crops passed. Recorded cgroup high-water was 479,576,064 bytes, leaving little spare RAM. |
+| Same reductions, actual decoded ACCIDENT `single (3)` preview, 120 requested frames and saved images on a disposable disk-backed volume | No OOM, but the unchanged 300-second execution deadline explicitly failed the job; process exited with the expected validation failure after 338.7 seconds including startup/shutdown. Recorded cgroup high-water reached 496,181,248 bytes (about 473 MiB). Completion, full artifacts and a successful 120-frame score were not obtained. |
+| Same reductions, first 12 decoded preview frames, followed by a separate existing-size 16-crop genuine re-ID batch | Twelve frames completed at 111.3 seconds including startup, with 12 saved image triplets; the last raw/tracked/score-overlay JPEGs decoded at 1280-pixel longest side. Peak heuristic score was 0.1103, not a probability. Recorded high-water before the separate crop stress was 469,708,800 bytes. The 16-crop embedder stress then reached the 512 MiB cap and OOM-killed the process at 119.8 seconds. |
+
+The video was an explicitly opted-in research preview, SHA-256
+`ce308189f4f3b6803e67e767a52247e80e1de415381f7e6f3ccb15f357689a41`;
+its attribution and **CC BY-NC-SA 4.0 noncommercial restriction** are described
+in the labeled-video section below. It was downloaded only for the experiment,
+not bundled or made a default source. Local capture was substituted for remote
+opening to isolate decoded-frame resource costs; this was **not** an
+authenticated Render/egress HTTP deployment test. The separate 16-crop stress
+used repeated 224x224 synthetic crops to exercise the embedder's existing batch
+capacity, not a claim that this preview contained 16 simultaneous detections.
+
+Allocator/thread/autograd reductions help a narrow workload, but have not
+established reliable memory headroom, full-batch completion, numerical
+equivalence or CPU throughput for production. No optimization was promoted into
+the runtime: silently shrinking re-ID batches, disabling the embedder,
+changing models or lifting deadlines would not demonstrate readiness. The
+independent durability, egress isolation and idle-lifecycle blockers below
+remain even if an individual short inference succeeds.
+
 Reproduce the basic failure after building the production image:
 
 ```sh
