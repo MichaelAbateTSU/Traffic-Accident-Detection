@@ -61,7 +61,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/niosh-media" "$RUNNER_TEMP/niosh-results"
           chmod 777 "$RUNNER_TEMP/niosh-results"
-          curl --fail --location --max-time 180 --max-filesize 80000000 \
+          curl --fail --head --max-time 30 \
+            https://upload.wikimedia.org/wikipedia/commons/b/b5/Crash_Testing_an_Ambulance.webm
+          curl --fail --location --max-time 180 --max-filesize 256000000 \
             https://upload.wikimedia.org/wikipedia/commons/b/b5/Crash_Testing_an_Ambulance.webm \
             -o "$RUNNER_TEMP/niosh-media/crash.webm"
           echo "8f1b4066b513067d0ac1118d5ed68e55a854fd2d4bdd54d592d341baf27b43cc  $RUNNER_TEMP/niosh-media/crash.webm" | sha256sum -c -

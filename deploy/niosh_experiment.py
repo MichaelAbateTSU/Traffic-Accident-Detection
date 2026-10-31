@@ -33,7 +33,7 @@ def main():
     from evaluate_accidents import Clip, Manifest, evaluate
 
     source = Path("/media/crash.webm")
-    if source.stat().st_size > 80_000_000:
+    if source.stat().st_size > 256_000_000:
         raise ValueError("Media exceeds budget")
     if hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE_SHA:
         raise ValueError("Source checksum mismatch")
