@@ -34,6 +34,7 @@ concurrency:
 
 jobs:
   cpu-runtime:
+    if: ${{ github.ref != 'refs/heads/michaelabatetsu-redesigned-spork' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
@@ -56,3 +57,31 @@ jobs:
             --mount "type=bind,source=$PWD/deploy/verify_cpu_runtime.py,target=/app/verify_cpu_runtime.py,readonly" \
             traffic-detection-cpu:ci \
             python verify_cpu_runtime.py --expected-machine aarch64
+  live-camera-no-retention:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/michaelabatetsu-redesigned-spork' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out isolated experiment without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build unchanged production image and proxy
+        run: |
+          git diff --exit-code ab28ded1e3eaf3824321843afe458958b1a0e676 -- \
+            Dockerfile requirements-production-amd64.txt requirements-production-arm64.txt \
+            app pipeline.py tracker.py accident_scorer.py config.py \
+            deploy/Dockerfile.egress deploy/egress_proxy.py
+          docker info >/dev/null
+          docker build --quiet --platform linux/amd64 -t traffic-live-smoke .
+          docker build --quiet -f deploy/Dockerfile.egress -t traffic-live-egress .
+      - name: Run fixed R2_061 through authenticated API without retaining imagery
+        env:
+          EXPERIMENT_REVISION: ${{ github.sha }}
+        run: python deploy/live_camera_smoke.py orchestrate
+      - name: Remove temporary services even after cancellation
+        if: always()
+        run: |
+          docker rm -f live-smoke-api live-smoke-egress >/dev/null 2>&1 || true
+          docker network rm live-smoke-private live-smoke-internet >/dev/null 2>&1 || true
