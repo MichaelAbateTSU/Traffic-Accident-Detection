@@ -208,9 +208,9 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
     for truth, prediction in zip(labels, detected):
         if truth is not None:
             counts[("tp" if prediction else "fn") if truth == 1 else ("fp" if prediction else "tn")] += 1
-    events = _runs([label == 1 for label in labels])
-    # Unknown frames are excluded and break alarm episodes.
-    alarms = _runs([flag and label is not None for flag, label in zip(detected, labels)])
+    dense = all(label is not None for label in labels)
+    events = _runs([label == 1 for label in labels]) if dense else []
+    alarms = _runs(detected) if dense else []
     hits = []
     for start, end in events:
         first = next((idx for idx in range(start, end) if detected[idx]), None)
@@ -236,11 +236,16 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
     )
     return {
         "frame_confusion": counts,
-        "events": hits,
-        "event_count": len(events),
-        "detected_events": sum(hit["detected"] for hit in hits),
-        "false_alarm_episodes": false_alarms,
-        "normal_seconds": sum(label == 0 for label in labels) / fps,
+        "temporal_metrics_available": dense,
+        "temporal_metrics_unavailable_reason": (
+            None if dense else "Unknown frame labels prevent continuous event boundaries and normal-time coverage"
+        ),
+        "labeled_frames": sum(label is not None for label in labels),
+        "events": hits if dense else None,
+        "event_count": len(events) if dense else None,
+        "detected_events": sum(hit["detected"] for hit in hits) if dense else None,
+        "false_alarm_episodes": false_alarms if dense else None,
+        "normal_seconds": sum(label == 0 for label in labels) / fps if dense else None,
         "negative_clip": negative,
         "negative_clip_alarm": negative and any(detected),
         "ignored_frames": sum(label is None for label in labels),
@@ -256,10 +261,12 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
 
 def aggregate_metrics(clips: list[dict]) -> dict:
     confusion = {key: sum(c["frame_confusion"][key] for c in clips) for key in ("tp", "fp", "tn", "fn")}
-    events = sum(c["event_count"] for c in clips)
-    hits = sum(c["detected_events"] for c in clips)
-    normal_hours = sum(c["normal_seconds"] for c in clips) / 3600
-    alarms = sum(c["false_alarm_episodes"] for c in clips)
+    dense_count = sum(c["temporal_metrics_available"] for c in clips)
+    complete = bool(clips) and dense_count == len(clips)
+    events = sum(c["event_count"] for c in clips) if complete else None
+    hits = sum(c["detected_events"] for c in clips) if complete else None
+    normal_hours = sum(c["normal_seconds"] for c in clips) / 3600 if complete else None
+    alarms = sum(c["false_alarm_episodes"] for c in clips) if complete else None
     negatives = sum(c["negative_clip"] for c in clips)
     negative_alarms = sum(c["negative_clip_alarm"] for c in clips)
     clip_confusion = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
@@ -272,8 +279,17 @@ def aggregate_metrics(clips: list[dict]) -> dict:
                       and clip["post_onset_alarm"] is not None]
     post_onset_hits = sum(clip["post_onset_alarm"] for clip in timed_positives)
     def ratio(numerator, denominator):
-        return numerator / denominator if denominator else None
+        return numerator / denominator if numerator is not None and denominator else None
     return {
+        "temporal_metrics_available": complete,
+        "temporal_metrics_unavailable_reason": (
+            None if complete else "Not all selected clips have dense labels; aggregate temporal metrics unavailable, no clips silently excluded"
+        ),
+        "selected_clip_count": len(clips),
+        "dense_label_clip_count": dense_count,
+        "incomplete_label_clip_count": len(clips) - dense_count,
+        "labeled_frames": sum(c["labeled_frames"] for c in clips),
+        "ignored_frames": sum(c["ignored_frames"] for c in clips),
         "frame_confusion": confusion,
         "frame_precision": ratio(confusion["tp"], confusion["tp"] + confusion["fp"]),
         "frame_recall": ratio(confusion["tp"], confusion["tp"] + confusion["fn"]),
@@ -454,7 +470,7 @@ def evaluate(manifest_path: Path, output: Path, split: str = "test",
             "Kinematics and most temporal thresholds use pixels/frame, not FPS-normalized units.",
             "Small selected clips are a smoke evaluation, not an accuracy benchmark.",
             "Normal pre-event segments are not independent normal-driving videos.",
-            "Ignored frames are excluded and break predicted alarm episodes.",
+            "Unknown labels exclude frame observations and make continuous temporal metrics unavailable.",
             "Onset-only labels provide clip/timing measures, not temporal frame/event accuracy.",
             "Video timestamps are frame-index/FPS approximations, not variable-rate PTS.",
             "Clip-level any-alarm indicators do not prove a post-onset collision detection.",

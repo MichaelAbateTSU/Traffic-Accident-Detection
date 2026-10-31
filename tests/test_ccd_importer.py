@@ -56,8 +56,8 @@ def test_ccd_manifest_normal_unknown_frames_keep_clip_false_alarm_metrics(tmp_pa
     normal_result = clip_metrics(normal.labels, predictions, normal.fps, normal.clip_label)
     assert normal_result["frame_confusion"] == {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
     assert normal_result["ignored_frames"] == 50
-    assert normal_result["normal_seconds"] == 0
-    assert normal_result["false_alarm_episodes"] == 0
+    assert normal_result["normal_seconds"] is None
+    assert normal_result["false_alarm_episodes"] is None
     assert normal_result["negative_clip_alarm"] is alarm
     assert normal_result["clip_alarm"] is alarm
     totals = aggregate_metrics([
@@ -68,7 +68,9 @@ def test_ccd_manifest_normal_unknown_frames_keep_clip_false_alarm_metrics(tmp_pa
     assert totals["negative_clip_count"] == 1
     assert totals["negative_clip_false_alarm_rate"] == int(alarm)
     assert totals["clip_confusion"] == {"tp": 0, "fp": int(alarm), "tn": int(not alarm), "fn": 1}
-    assert totals["normal_hours"] == (30 / 10) / 3600
+    assert totals["normal_hours"] is None
+    assert totals["dense_label_clip_count"] == 1
+    assert totals["incomplete_label_clip_count"] == 1
     normal_only = aggregate_metrics([normal_result])
     assert normal_only["frame_false_positive_rate"] is None
     assert normal_only["false_alarm_episodes_per_normal_hour"] is None
