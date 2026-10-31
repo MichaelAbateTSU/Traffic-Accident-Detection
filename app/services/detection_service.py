@@ -25,6 +25,7 @@ by the caller (see api/detect.py) so it does not block the event loop.
 from __future__ import annotations
 
 import logging
+from itertools import islice
 import os
 import shutil
 import time
@@ -223,9 +224,7 @@ def run_detection_job(
         else:
             cap = _open_video(stream_url)
         cap.get(0x00000005)  # CAP_PROP_FPS = 5
-        for frame in _iter_video(cap):
-            if frames_processed >= max_frames:
-                break
+        for frame in islice(_iter_video(cap), max_frames):
             if time.monotonic() - t_job_start > settings.job_timeout_seconds:
                 raise TimeoutError("Detection exceeded JOB_TIMEOUT_SECONDS")
             if settings.environment == "production":

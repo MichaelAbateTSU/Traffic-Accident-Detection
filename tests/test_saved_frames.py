@@ -21,7 +21,7 @@ def test_worker_deadline_and_frame_retention(frame_pipeline, monkeypatch):
     detection_service.run_detection_job(job.job_id, source, 2, object(), save_frames=True)
     assert len(job_store.get(job.job_id).frames) == saver.call_count == 1
     monkeypatch.setattr(settings, "job_timeout_seconds", 1)
-    monkeypatch.setattr(detection_service.time, "monotonic", Mock(side_effect=[0, 2]))
+    monkeypatch.setattr(detection_service, "time", Mock(monotonic=Mock(side_effect=[0, 2])))
     timed = job_store.create(source)
     detection_service.run_detection_job(timed.job_id, source, 2, object())
     assert job_store.get(timed.job_id).status == "failed"
@@ -57,6 +57,32 @@ def test_300_frame_job_persists_all_results_and_bounded_images(frame_pipeline, m
     assert recovered.status == "complete" and recovered.max_frames == 300
     assert len(recovered.events) == len(recovered.frames) == 300
     restarted._db.close()
+
+
+def test_nine_camera_saved_batch_retains_every_camera_and_active_artifacts(frame_pipeline, monkeypatch):
+    _, output, _, _, _, _ = frame_pipeline
+    monkeypatch.setattr(settings, "job_artifact_retention_count", 9)
+    active = job_store.create("https://cams.example.com/active/playlist.m3u8")
+    active_dir = output / active.job_id
+    active_dir.mkdir()
+    (active_dir / "active.jpg").write_bytes(b"still being written")
+    job_store.update(active.job_id, status="running")
+    batch = []
+    for camera in range(9):
+        source = f"https://cams.example.com/camera-{camera}/playlist.m3u8"
+        job = job_store.create(source, max_frames=1, save_frames=True)
+        detection_service.run_detection_job(job.job_id, source, 1, object(), save_frames=True)
+        batch.append(job.job_id)
+    assert all(job_store.get(jid).status == "complete" for jid in batch)
+    assert all(len(list((output / jid).rglob("*.jpg"))) == 3 for jid in batch)
+    assert (active_dir / "active.jpg").read_bytes() == b"still being written"
+    # A tenth terminal saved job evicts only the oldest terminal job, not active output.
+    source = "https://cams.example.com/next-camera/playlist.m3u8"
+    next_job = job_store.create(source, max_frames=1, save_frames=True)
+    detection_service.run_detection_job(next_job.job_id, source, 1, object(), save_frames=True)
+    assert not (output / batch[0]).exists()
+    assert all((output / jid).exists() for jid in batch[1:] + [next_job.job_id])
+    assert active_dir.exists()
 
 
 @pytest.fixture()
@@ -261,6 +287,7 @@ def test_real_iterator_capture_release_on_exhaustion_or_frame_limit(frame_pipeli
     detection_service.run_detection_job(job.job_id, job.stream_url, 2, object())
     assert job_store.get(job.job_id).status == "complete"
     assert detector.call_count == min(source_frames, 2)
+    assert cap.read.call_count == min(source_frames + 1, 2)
     cap.release.assert_called()
 
 

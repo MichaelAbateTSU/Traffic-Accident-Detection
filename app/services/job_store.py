@@ -213,7 +213,7 @@ class JobStore:
         with self._lock:
             active = sum(j.status in ("pending", "running") for j in self._jobs.values())
             if capacity is not None and active >= capacity:
-                raise JobCapacityError("The server is already processing a job. Please retry later.")
+                raise JobCapacityError("The running/pending job capacity is exhausted. Please retry later.")
             while len(self._jobs) >= settings.max_retained_jobs:
                 terminal = [j for j in self._jobs.values() if j.status in ("complete", "failed")]
                 if not terminal:

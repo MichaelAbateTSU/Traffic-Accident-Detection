@@ -181,7 +181,8 @@ LOG_LEVEL=INFO
 |---|---|---|
 | `YOLO_MODEL` | `yolo11x.pt` | Model weights file |
 | `CORS_ORIGINS` | `*` | Comma-separated frontend origins (`*` = allow all) |
-| `MAX_CONCURRENT_JOBS` | `1` | Atomically rejects new jobs when pending/running jobs fill capacity (503) |
+| `MAX_CONCURRENT_JOBS` | `10` locally, `1` in production | Inference workers; production always executes one job at a time |
+| `MAX_PENDING_JOBS` | `9` | Production waiting capacity in addition to the single worker; rejects overload with 503 |
 | `JOB_TTL_SECONDS` | `3600` | How long completed job results stay in memory |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `API_PREFIX` | `` | Optional prefix for all routes, e.g. `/api/v1` |

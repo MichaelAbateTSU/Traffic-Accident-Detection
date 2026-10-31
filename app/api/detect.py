@@ -13,7 +13,6 @@ GET /jobs/{job_id}
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -21,7 +20,6 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.core.config import settings
 from app.core.security import validate_stream_url
 from app.models.schemas import DetectRequest, DetectionResult, JobAccepted
-from app.services.detection_service import run_detection_job
 from app.services.job_store import JobCapacityError, job_store
 
 logger = logging.getLogger(__name__)
@@ -73,18 +71,6 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
     Returns immediately with a `job_id`; processing happens in a background
     thread so the event loop is never blocked.
     """
-    # Guard: reject new jobs when the server is already at capacity.
-    running = job_store.count_running()
-    if running >= settings.max_concurrent_jobs:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                f"Server is already running {running} job(s). "
-                f"Maximum concurrent jobs: {settings.max_concurrent_jobs}. "
-                "Please wait for an existing job to finish."
-            ),
-        )
-
     # Guard: YOLO model must be loaded (set in lifespan).
     model = getattr(request.app.state, "model", None)
     if model is None:
@@ -95,11 +81,14 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
 
     stream_url = str(body.stream_url)
     validate_stream_url(stream_url)
+    queue = getattr(request.app.state, "detection_queue", None)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="The inference queue is unavailable.")
     max_frames = JOB_MAX_FRAMES
     try:
         job = job_store.create(
             stream_url, max_frames=max_frames, save_frames=body.save_frames,
-            capacity=settings.max_concurrent_jobs,
+            capacity=settings.get_job_admission_capacity(),
         )
     except JobCapacityError as exc:
         raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
@@ -111,9 +100,7 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
 
     # Offload the blocking CPU work to a thread so the event loop stays free.
     try:
-        asyncio.get_running_loop().run_in_executor(
-            None,
-            run_detection_job,
+        queue.submit(
             job.job_id,
             stream_url,
             max_frames,

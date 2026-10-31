@@ -36,6 +36,8 @@ def production_settings(**overrides):
     {"job_database_path": None},
     {"output_dir": None},
     {"max_concurrent_jobs": 2},
+    {"job_artifact_retention_count": 8},
+    {"max_retained_jobs": 9},
     {"approved_stream_urls": ["file:///etc/passwd"]},
     {"approved_stream_urls": ["https://user:secret@example.com/live"]},
     {"environment": "typo"},
@@ -91,6 +93,8 @@ def test_production_cors_includes_auth_and_csv_headers(monkeypatch):
 def test_production_sources_are_exactly_approved(client, monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     monkeypatch.setattr(settings, "approved_stream_urls", [SOURCE])
+    monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
+    monkeypatch.setattr(settings, "max_pending_jobs", 0)
     monkeypatch.setattr(client.app.state, "model", object())
     loop = client.portal.call(asyncio.get_running_loop)
     monkeypatch.setattr(loop, "run_in_executor", Mock())
@@ -102,6 +106,14 @@ def test_production_sources_are_exactly_approved(client, monkeypatch):
     assert client.post("/detect-accident", json={"stream_url": SOURCE}).status_code == 202
     # Pending jobs count against capacity before the worker starts.
     assert client.post("/detect-accident", json={"stream_url": SOURCE}).status_code == 503
+
+
+def test_development_default_is_preserved_and_production_is_single_worker():
+    assert Settings(_env_file=None).max_concurrent_jobs == 10
+    configured = production_settings()
+    assert configured.max_concurrent_jobs == 1
+    assert configured.max_pending_jobs == 9
+    assert configured.get_job_admission_capacity() == 10
 
 
 def test_atomic_admission_under_concurrent_calls():

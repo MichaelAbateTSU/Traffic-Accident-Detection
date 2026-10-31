@@ -68,10 +68,11 @@ class Settings(BaseSettings):
         description="How long completed/failed jobs are retained in memory.",
     )
     max_concurrent_jobs: int = Field(
-        default=1,
+        default=10,
         ge=1,
-        description="Refuse new jobs when this many are already running.",
+        description="Inference workers. Production defaults to and requires one.",
     )
+    max_pending_jobs: int = Field(default=9, ge=0, le=99)
     job_artifact_retention_count: int = Field(
         default=10,
         ge=1,
@@ -100,6 +101,11 @@ class Settings(BaseSettings):
             return ["*"]
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
+    def get_job_admission_capacity(self) -> int:
+        if self.environment == "production":
+            return self.max_concurrent_jobs + self.max_pending_jobs
+        return self.max_concurrent_jobs
+
     @model_validator(mode="after")
     def validate_production(self) -> "Settings":
         if self.environment not in {"development", "production"}:
@@ -121,8 +127,14 @@ class Settings(BaseSettings):
             raise ValueError("Production requires explicit HTTPS CORS_ORIGINS")
         if not self.job_database_path or not self.output_dir:
             raise ValueError("Production requires JOB_DATABASE_PATH and OUTPUT_DIR")
+        if "max_concurrent_jobs" not in self.model_fields_set:
+            self.max_concurrent_jobs = 1
         if self.max_concurrent_jobs != 1:
             raise ValueError("The shared production model requires MAX_CONCURRENT_JOBS=1")
+        if self.max_retained_jobs < self.get_job_admission_capacity():
+            raise ValueError("MAX_RETAINED_JOBS must accommodate the running and pending queue capacity")
+        if self.job_artifact_retention_count < 9:
+            raise ValueError("Production must retain artifacts for at least one nine-camera batch")
         for source in self.approved_stream_urls:
             parsed = urlsplit(source)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.fragment:

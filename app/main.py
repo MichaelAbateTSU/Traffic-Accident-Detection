@@ -31,6 +31,9 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.security import AuthenticationMiddleware
+from app.services.detection_queue import DetectionQueue
+from app.services.detection_service import run_detection_job
+from app.services.job_store import job_store
 from app.api import cameras, dashboard, detect, health, incidents, jobs, stats
 
 logger = logging.getLogger(__name__)
@@ -80,10 +83,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.model = None
     # ------------------------------------------------------------------
 
-    yield  # server runs here
-
-    logger.info("Shutting down %s", settings.app_title)
-    app.state.model = None
+    app.state.detection_queue = DetectionQueue(
+        job_store, run_detection_job, max_workers=settings.max_concurrent_jobs,
+    )
+    try:
+        yield
+    finally:
+        logger.info("Shutting down %s", settings.app_title)
+        app.state.detection_queue.close()
+        app.state.model = None
 
 
 # ---------------------------------------------------------------------------
