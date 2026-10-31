@@ -69,7 +69,7 @@ jobs:
           fetch-depth: 0
       - name: Build unchanged production image and proxy
         run: |
-          git diff --exit-code ab28ded1e3eaf3824321843afe458958b1a0e676 -- \
+          git diff --exit-code 0408066230734c8bf88eac0aeeed313d7c01e950 -- \
             Dockerfile requirements-production-amd64.txt requirements-production-arm64.txt \
             app pipeline.py tracker.py accident_scorer.py config.py \
             deploy/Dockerfile.egress deploy/egress_proxy.py

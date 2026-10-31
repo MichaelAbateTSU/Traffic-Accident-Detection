@@ -8,7 +8,7 @@ checks remain unchanged outside this experimental branch.
 
 The image, locked dependencies, API, source validation, YOLO11n, DeepSORT and
 scorer must match production revision
-`ab28ded1e3eaf3824321843afe458958b1a0e676`. Only the fixed existing R2_061 HTTPS
+`0408066230734c8bf88eac0aeeed313d7c01e950`. Only the fixed existing R2_061 HTTPS
 source is approved; there are no URL inputs. The authenticated API runs on
 container loopback inside an internal-only Docker network; the production
 exact-host/public-IP-pinned proxy is the only internet route. No ports are

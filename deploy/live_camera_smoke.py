@@ -21,7 +21,9 @@ COUNTERS = {
     "yolo_calls": 0, "vehicle_detections": 0, "tracker_calls": 0,
     "confirmed_track_observations": 0, "max_confirmed_tracks": 0, "scorer_calls": 0,
     "deep_sort_embedder_calls": 0, "embedded_crop_count": 0, "blocked_write_attempts": 0,
+    "job_finished": False,
 }
+PROBE_STATE = {"stage": "initialization", "job_submitted": False}
 
 
 def serve():
@@ -94,10 +96,12 @@ def serve():
         try:
             return original_job(*args, **kwargs)
         finally:
+            COUNTERS["job_finished"] = True
             METRICS.write_text(json.dumps(COUNTERS))
 
     # The application imported the job callable before installing the measurement wrapper.
     main_module.run_detection_job = measured_job
+    METRICS.write_text(json.dumps(COUNTERS))
     uvicorn.run(main_module.app, host="127.0.0.1", port=8000, workers=1, access_log=False)
 
 
@@ -132,21 +136,28 @@ def probe():
             raise RuntimeError("Production API did not become healthy")
         time.sleep(1)
 
+    PROBE_STATE["stage"] = "unauthenticated_request_rejection"
     assert request("/jobs", authenticated=False)[0] == 401
+    PROBE_STATE["stage"] = "invalid_token_rejection"
     assert request("/jobs", invalid=True)[0] == 401
+    PROBE_STATE["stage"] = "unapproved_source_rejection"
     assert request("/detect-accident", {"stream_url": "https://example.com/blocked"})[0] == 403
+    PROBE_STATE["stage"] = "direct_egress_rejection"
     try:
         with socket.create_connection(("1.1.1.1", 443), timeout=2):
             raise AssertionError("API has direct internet egress")
     except (TimeoutError, OSError):
         pass
+    PROBE_STATE["stage"] = "unapproved_proxy_host_rejection"
     with socket.create_connection(("egress", 3128), timeout=3) as connection:
         connection.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
         assert connection.recv(1024).startswith(b"HTTP/1.1 403 ")
+    PROBE_STATE["stage"] = "fixed_source_job_submission"
     status, submitted = request("/detect-accident", {
         "stream_url": SOURCE, "max_frames": MAX_FRAMES, "save_frames": False,
     })
     assert status == 202
+    PROBE_STATE.update(stage="waiting_for_terminal_job", job_submitted=True)
     deadline = time.monotonic() + 160
     while True:
         status, job = request("/jobs/" + submitted["job_id"])
@@ -156,9 +167,10 @@ def probe():
         if time.monotonic() > deadline:
             raise RuntimeError("Bounded live job did not reach a terminal state")
         time.sleep(1)
+    PROBE_STATE["stage"] = "terminal_job_evidence"
     # Worker publishes counters just after updating the terminal job.
     for _ in range(20):
-        if METRICS.exists():
+        if METRICS.exists() and json.loads(METRICS.read_text())["job_finished"]:
             break
         time.sleep(0.1)
     counts = json.loads(METRICS.read_text())
@@ -256,7 +268,7 @@ def orchestrate():
             result = json.loads(outcome.stdout)
             print(json.dumps(result | {
                 "experiment_revision": os.environ["EXPERIMENT_REVISION"],
-                "production_revision": "ab28ded1e3eaf3824321843afe458958b1a0e676",
+                "production_revision": "0408066230734c8bf88eac0aeeed313d7c01e950",
                 "weights_sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
                 "model": "YOLO11n", "tracker": "DeepSORT", "scorer": "AccidentScorer",
                 "api_read_only": True, "artifact_mount_read_only": True,
@@ -289,5 +301,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.mode == "serve":
         serve()
+    elif args.mode == "probe":
+        try:
+            successful = probe()
+        except Exception as exc:
+            # Never expose raw HTTP bodies, native errors, paths or credentials.
+            evidence = {
+                "status": "experiment_validation_failed", **PROBE_STATE,
+                "error_type": type(exc).__name__,
+                "artifact_file_count": sum(
+                    p.is_file() for p in Path("/data/artifacts").rglob("*")
+                ),
+            }
+            if METRICS.exists():
+                evidence.update(json.loads(METRICS.read_text()))
+            print(json.dumps(evidence), flush=True)
+            sys.exit(1)
+        sys.exit(0 if successful else 1)
     else:
-        sys.exit(0 if (probe() if args.mode == "probe" else orchestrate()) else 1)
+        sys.exit(0 if orchestrate() else 1)
