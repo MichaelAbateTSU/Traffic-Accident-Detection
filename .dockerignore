@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+deploy/.env
+__pycache__
+.pytest_cache
+captures
+captures_annotated
+pipeline_output
+*.pt
+tests
