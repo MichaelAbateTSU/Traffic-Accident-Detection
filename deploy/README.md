@@ -33,6 +33,87 @@ performance**. The earlier local ARM emulation attempt failed because QEMU
 was unavailable; that separate failure does not invalidate the native result.
 Public ACME issuance, VM reboot and live-cloud availability remain unverified.
 
+## Render Free feasibility
+
+**The current backend cannot safely run on Render Free.** No Render service
+was provisioned, and no public deployment is implied by this assessment.
+[Render's compute plans](https://render.com/docs/compute-plans) specify
+0.1 CPU / 512 MB for free web services.
+[Render's Free documentation](https://render.com/docs/free) describes idle
+spin-down after 15 minutes, ephemeral local files, no free persistent disks,
+and Free Postgres expiry after 30 days.
+These limits were supplied from an official-document review; this workspace
+could not independently refresh that page because `render.com` DNS resolution
+failed. Recheck the provider's current limits before making any purchase.
+
+On 2026-10-31, the locked **amd64** production image was tested locally with
+`--cpus 0.1 --memory 512m --memory-swap 512m` (no swap), retaining YOLO11n,
+DeepSORT, two inference threads and the real scorer. The existing offline smoke
+attempts two three-frame jobs, using a tiny 64x64 synthetic decoding fixture but
+actual inference and indexed JPEG writes. The first run was OOM-killed after
+approximately 65 seconds, before completing even the first job. A repeat with
+Docker health checks disabled loaded YOLO around 24 seconds, initialized
+DeepSORT, then was OOM-killed after **48.2 seconds**: exit code **137** and
+Docker `OOMKilled=true`. The last two-second cgroup sample recorded a peak of
+425,107,456 bytes at 44.48 seconds; this is a sampled lower bound, **not** the
+terminal peak. No inference completion time or successful frame count was
+obtained. This is a representative local resource-limit experiment, not a
+measurement on Render hardware; real camera decoding/resolution can need more
+resources, not less.
+
+Reproduce the basic failure after building the production image:
+
+```sh
+docker build -t traffic-detection-cpu:render-limit-check .
+docker create --name traffic-render-limit-check --no-healthcheck \
+  --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --cpus 0.1 \
+  --memory 512m --memory-swap 512m --pids-limit 128 \
+  --tmpfs /tmp:size=64m,mode=1777 --tmpfs /data:size=32m,mode=1777 \
+  --mount "type=bind,source=$PWD/deploy/verify_cpu_runtime.py,target=/app/verify_cpu_runtime.py,readonly" \
+  traffic-detection-cpu:render-limit-check \
+  python verify_cpu_runtime.py --expected-machine x86_64
+docker start -a traffic-render-limit-check
+docker inspect --format '{{json .State}}' traffic-render-limit-check
+docker rm traffic-render-limit-check
+```
+
+There are additional independent blockers even if memory were sufficient:
+
+- **Durability:** `/data/jobs.sqlite3` and saved frames require persistent
+  storage. Render's ephemeral filesystem loses them on replacement/redeploy,
+  preventing accepted-job restart recovery and breaking protected image links.
+  A 30-day Free Postgres database is not a durable replacement, and changing
+  database engines would not preserve the images. Remote database/object
+  storage would need authorization, bounded quotas, expiry/retention and
+  validated failure/recovery behavior.
+- **SSRF isolation:** this stack relies on Docker Compose's internal-only API
+  network and a separate dual-homed proxy as the sole outbound route. A single
+  Render web container does not reproduce that topology. Merely setting proxy
+  environment variables, or running a proxy beside an Internet-connected API,
+  does not enforce the existing egress boundary. A different enforceable
+  deployment architecture must be designed and tested, not silently removed.
+- **Ingress and lifecycle:** Render supplies HTTPS and expects binding to
+  `0.0.0.0:$PORT` (see [web services](https://render.com/docs/web-services)).
+  The current command and health check use port 8000 and trust only the Compose
+  Caddy address. Port/proxy adaptation is possible but does not solve memory,
+  storage or network isolation. Free idle spin-down also precludes an
+  always-running service and requires explicit cold-start/job interruption
+  handling; keep-alive traffic is not an availability guarantee.
+
+**Render remains the user's preferred provider**; no alternative has been
+selected. An **authorized Oracle Always Free VM** is only an unselected free
+candidate with potentially sufficient CPU, RAM and persistent storage for the
+existing Compose stack, subject to capacity/reclamation limitations below.
+No Oracle VM deployment has been verified. Keeping the frontend on GitHub Pages
+is independent of this backend choice. Deploying this backend on Render requires
+a separately authorized **paid, adequately sized** runtime and
+durable disk or database/object storage, plus an enforceable egress design.
+The existing two-CPU/4-GB runtime envelope is tested; no smaller paid tier is
+certified here. Paying for RAM alone does not fix the other blockers. No paid
+plan, external account, model downgrade, lost persistence guarantee or relaxed
+authentication/source protection has been selected or provisioned.
+
 ## Free-host requirements
 
 An Oracle **Always Free** `VM.Standard.A1.Flex` instance in the account's home
