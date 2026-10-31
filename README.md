@@ -824,6 +824,54 @@ is an author-labeled normal **prefix from a different original video**, at least
 small smoke comparison, not a general false-alarm/accuracy estimate. Missing
 media fails explicitly; the importer does not claim to download it.
 
+### CCD frame-labeled clips
+
+The [Car Crash Dataset authors](https://github.com/Cogito2012/CarCrashDataset)
+document 50 sequential frames at 10 fps with 50 binary `binlabels` per crash.
+`prepare_ccd.py` consumes the original `Crash-1500.txt` and private local
+`Crash-1500/<six-digit-id>.mp4` / `Normal/<six-digit-id>.mp4` files. It decodes
+each selected video and requires exactly 50 frames at 10 fps: it never resamples,
+truncates or repeats labels to fit a different video. The annotation's
+`startframe` locates the clip in its **untrimmed original**; it is not a seek
+offset into the downloaded trimmed clip. Binary label index zero maps to decoded
+frame zero. All crash labels, including any later zeros, are preserved.
+
+The author README does **not** specify footage-use terms. Its MIT software
+license is not proof of video rights. Crash videos originate from YouTube;
+normal videos originate from BDD100K and require checking applicable upstream
+terms separately. Obtain permitted local media and verify rights before running;
+do not accept gated terms for someone else, commit media or redistribute frames.
+Supply the verified terms/attribution text in a local file. This records
+provenance, not permission. Cite Bao, Yu and Kong, ACM Multimedia 2020.
+
+```bash
+python prepare_ccd.py \
+  --annotations downloads/ccd/Crash-1500.txt \
+  --media-root downloads/ccd/videos \
+  --positive 000001 --normal 000001 \
+  --terms-file downloads/ccd/verified-footage-terms.txt \
+  --output downloads/ccd/manifest.json
+
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 INFERENCE_THREADS=2 \
+python evaluate_accidents.py \
+  --manifest downloads/ccd/manifest.json --split test \
+  --output evaluation_output/ccd-smoke --model yolo11n.pt \
+  --max-frame-side 1280
+```
+
+`--split` selects a local evaluation partition; it does not assert official
+train/test membership. Crash groups use the author original YouTube numeric ID.
+The normal category supplies only `clip_label: 0`, not author-provided binary
+frame labels. Its 50 frame labels remain `null`: clip-level false-alarm metrics
+are available, but these frames contribute neither to frame confusion nor to
+labeled-normal hours or temporal false-alarm episodes. Original BDD recording
+IDs are unavailable: normal grouping identifies clips,
+not proven recording-level separation across the entire dataset. Shared numeric
+filenames in `Normal` and `Crash-1500` are distinct clips. Reports expose frame
+confusion, event overlap/latency and false alarms, not calibrated probabilities
+or population accuracy from a tiny selection. If annotations/media cannot be
+fetched, no CCD measurements or checksum verification should be claimed.
+
 ### Other local videos or frame sequences
 
 For the **ACCIDENT** dataset's official `metadata-real.csv`, an onset timestamp
