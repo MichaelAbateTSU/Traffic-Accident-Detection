@@ -57,7 +57,7 @@ async def get_camera_status() -> list[FrontendCameraStatus]:
                 status=_status_from_job(job.status),
                 stream_url=job.stream_url,
                 last_job_id=job.job_id,
-                last_seen_at=job.completed_at or job.created_at,
+                last_seen_at=job.completed_at or job.started_at or job.created_at,
             )
         )
 
@@ -81,7 +81,7 @@ async def get_camera_latest_frame(camera_id: str) -> CameraLatestFrameResponse:
     job, frame = found
     image_url = frame.capture or frame.capture_annotated or frame.pipeline_output
     annotated_url = frame.pipeline_output or frame.capture_annotated or frame.capture
-    captured_at = job.completed_at if job.status in ("complete", "failed") and job.completed_at else job.created_at
+    captured_at = job.completed_at if job.status in ("complete", "failed") and job.completed_at else (job.started_at or job.created_at)
     data = CameraLatestFrame(
         camera_id=camera_id,
         cameraId=camera_id,

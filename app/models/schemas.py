@@ -60,7 +60,7 @@ class DetectionEvent(BaseModel):
 
     frame_idx: int = Field(description="Zero-based frame index within the job.")
     timestamp_sec: float = Field(
-        description="Approximate wall-clock seconds from job start when the frame was processed."
+        description="Processing elapsed seconds from actual job start, not media time or queue admission."
     )
     accident_detected: bool
     confidence_score: float = Field(
@@ -140,6 +140,10 @@ class DetectionResult(BaseModel):
     )
     error: str | None = None
     created_at: datetime
+    started_at: datetime | None = Field(
+        default=None,
+        description="Actual processing start (UTC); null for pending or legacy jobs with no known start.",
+    )
     completed_at: datetime | None = None
 
 
@@ -281,6 +285,7 @@ class IncidentDetail(IncidentSummary):
     stream_url: str
     job_status: Literal["pending", "running", "complete", "failed"]
     created_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None = None
 
 
@@ -308,6 +313,7 @@ class JobSummary(BaseModel):
     stream_url: str
     camera_id: str
     created_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None = None
     frames_processed: int = Field(ge=0)
     peak_confidence: float = Field(ge=0.0, le=1.0)
@@ -334,6 +340,7 @@ class JobStatusSummary(BaseModel):
     progress: float | None = Field(default=None, ge=0.0, le=100.0, description="Alias of progress_percent.")
     updated_at: datetime
     created_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None = None
 
 
