@@ -18,10 +18,19 @@ proxy, authenticated JPEG retrieval, private/metadata egress rejection, and
 preserved results/images after API restart and recreation, including a
 300-frame worker regression with 900 saved JPEGs and durable results, plus a
 nine-job HTTPS inference batch whose first/last images survive restart.
-The arm64 lock was resolved against ARM wheels. An ARM64 build was attempted
-on this amd64 host, but failed at the first shell instruction with
-`exec /bin/sh: exec format error`: QEMU/ARM emulation is not installed or
-advertised by its BuildKit worker. No native or emulated ARM runtime passed here.
+The ARM64 production image subsequently **built and passed native runtime
+verification** on GitHub's standard `ubuntu-24.04-arm` runner:
+[run 41220324104](https://github.com/MichaelAbateTSU/Traffic-Accident-Detection/actions/runs/41220324104),
+tested commit `9d9b764342a8d6f5d540f174c4d5d6cba7936da1`.
+The native `aarch64` image initialized actual YOLO11n and DeepSORT/scorer,
+processed two three-frame synthetic jobs, wrote indexed JPEG triplets, and
+observed **two CPU threads in all six model forwards**, including first
+predictor setup and a repeated job. Serving ran non-root, network-disabled,
+read-only, with two CPUs/4 GB and bounded tmpfs; no footage/model artifacts were
+uploaded and no secrets were used. This validates architecture/runtime
+compatibility, **not Oracle deployment, remote camera decoding or production
+performance**. The earlier local ARM emulation attempt failed because QEMU
+was unavailable; that separate failure does not invalidate the native result.
 Public ACME issuance, VM reboot and live-cloud availability remain unverified.
 
 ## Free-host requirements
@@ -253,7 +262,7 @@ production-preprocessing comparisons. A corrected evaluation must use
 `INTER_LINEAR` with the same target dimensions and thread settings.
 The deployment retains a configurable 300-second execution cap with
 explicit terminal timeout failures, not complete partial results. Actual native
-ARM/VM timing remains unmeasured and must be checked before claiming throughput.
+ARM camera/VM timing remains unmeasured and must be checked before claiming throughput.
 
 At most 300 frame triplets are saved per job, with a 2 MB limit per JPEG. The
 most recent **nine** completed/failed saved jobs plus the active job retain
@@ -314,3 +323,13 @@ Dependency locks can be refreshed deliberately with `uv pip compile`, Python
 x86_64-manylinux_2_28` / `aarch64-manylinux_2_28`; see each lock's generated command.
 Rebuild and rerun the smoke after dependency/model/config changes. Keep a
 previous reviewed image and back up persistent state before deployment updates.
+
+The [native ARM workflow](../.github/workflows/native-arm-runtime.yml) repeats
+the actual image build and offline synthetic runtime check on relevant pushes
+and pull requests, or manual dispatch. It uses GitHub's standard ARM hosted
+runner (free for this public repository), read-only repository permissions and
+a SHA-pinned checkout with no persisted credentials. It neither provisions
+cloud resources nor publishes an image/artifact. `deploy/verify_cpu_runtime.py`
+also runs against an existing amd64 image with `--expected-machine x86_64`;
+its synthetic decoder fixture does not stand in for the separately verified
+authenticated network/video smoke.
