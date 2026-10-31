@@ -97,7 +97,7 @@ def _to_frontend_incident(record: dict) -> FrontendIncident:
     "/dashboard",
     response_model=FrontendDashboardResponse,
     summary="Get dashboard bootstrap payload (stats + incidents + cameras)",
-    description="Incidents are alarm-active frame records, not distinct accidents; uptime_percent is a nonfailed-job fraction, not measured service uptime.",
+    description="Incidents are alarm-active frame records, not distinct accidents; uptime_percent is a nonfailed-job fraction, not measured service uptime. Camera statuses/counts are derived from retained jobs, not a registry or heartbeat; detection_status derives from model state and job counts, not stream health.",
 )
 async def get_dashboard(
     request: Request,

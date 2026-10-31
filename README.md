@@ -360,6 +360,12 @@ Dashboard-oriented aggregate metrics with metadata envelope.
 
 ---
 
+**Camera and detection status semantics.** Camera data is derived from retained jobs, not from a camera registry, heartbeat or stream health check:
+
+- `GET /cameras/status` and `/dashboard` `cameras` list one entry per distinct source ID among retained jobs (video URLs/files included). Status comes from the latest job by `created_at`: `pending`/`running` -> `online`, `failed` -> `warning`, `complete` -> `offline`. `last_seen_at` is that job's `completed_at`, else `started_at`, else `created_at` — a job timestamp, not a heartbeat.
+- `active_cameras` counts distinct source IDs among pending/running jobs; `total_cameras` counts distinct source IDs among all retained jobs (never below `active_cameras`).
+- `detection_status` is derived from model-loaded state and job counts: `starting` if the model is not loaded; `degraded` if failed jobs exceed complete plus running jobs; `active` if any job is running; otherwise `idle`. It is not continuous stream health.
+
 ### `GET /incidents`
 
 `bounding_box` / `boundingBox` is `[x1, y1, x2, y2]` in processed-frame pixels (after any

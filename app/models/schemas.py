@@ -224,6 +224,25 @@ MANUALLY_UPDATED_DESCRIPTION = (
     "resolved_at and note come from that override rather than the job-state default."
 )
 
+CAMERA_COUNT_DESCRIPTION = (
+    "Derived from retained jobs, not a camera registry or health check: active_cameras is the number "
+    "of distinct source IDs among pending/running jobs; total_cameras is the number of distinct "
+    "source IDs among all retained jobs (video URLs/files included), never less than active_cameras."
+)
+DETECTION_STATUS_DESCRIPTION = (
+    "Derived from model-loaded state and retained job counts, not continuous stream health: "
+    "'starting' if the model is not loaded; else 'degraded' if failed jobs exceed complete plus "
+    "running jobs; else 'active' if any job is running; else 'idle'."
+)
+CAMERA_STATUS_DESCRIPTION = (
+    "Derived from the camera's latest retained job (by created_at), not camera availability: "
+    "pending/running -> 'online', failed -> 'warning', anything else (complete) -> 'offline'."
+)
+CAMERA_LAST_SEEN_DESCRIPTION = (
+    "Job timestamp (latest job's completed_at, else started_at, else created_at); "
+    "not a heartbeat or last-frame-received time."
+)
+
 ALARM_FRAME_COUNT_DESCRIPTION = (
     "Retained alarm-active frame records detected from UTC midnight through now, "
     "including consecutive frames and resolved records; not distinct accidents or episodes."
@@ -237,10 +256,10 @@ NONFAILED_JOB_RATIO_DESCRIPTION = (
 class StatsOverview(BaseModel):
     """Dashboard overview values for card widgets."""
 
-    active_cameras: int = Field(ge=0)
-    total_cameras: int = Field(ge=0)
+    active_cameras: int = Field(ge=0, description=CAMERA_COUNT_DESCRIPTION)
+    total_cameras: int = Field(ge=0, description=CAMERA_COUNT_DESCRIPTION)
     incidents_today: int = Field(ge=0, description=ALARM_FRAME_COUNT_DESCRIPTION)
-    detection_status: Literal["active", "idle", "degraded", "starting"]
+    detection_status: Literal["active", "idle", "degraded", "starting"] = Field(description=DETECTION_STATUS_DESCRIPTION)
     uptime_percent: float = Field(ge=0.0, le=100.0, description=NONFAILED_JOB_RATIO_DESCRIPTION)
     active_jobs: int = Field(ge=0)
     total_jobs: int = Field(ge=0)
@@ -249,10 +268,10 @@ class StatsOverview(BaseModel):
     window_end: datetime
 
     # UI-friendly aliases (camelCase)
-    activeCameras: int = Field(ge=0)
-    totalCameras: int = Field(ge=0)
+    activeCameras: int = Field(ge=0, description=CAMERA_COUNT_DESCRIPTION)
+    totalCameras: int = Field(ge=0, description=CAMERA_COUNT_DESCRIPTION)
     incidentsToday: int = Field(ge=0, description=ALARM_FRAME_COUNT_DESCRIPTION)
-    detectionStatus: Literal["active", "idle", "degraded", "starting"]
+    detectionStatus: Literal["active", "idle", "degraded", "starting"] = Field(description=DETECTION_STATUS_DESCRIPTION)
     uptimePercent: float = Field(ge=0.0, le=100.0, description=NONFAILED_JOB_RATIO_DESCRIPTION)
 
 
@@ -417,20 +436,20 @@ class JobDetectionsResponse(BaseModel):
 
 class FrontendStats(BaseModel):
     # snake_case (native API)
-    active_cameras: int
-    total_cameras: int
+    active_cameras: int = Field(description=CAMERA_COUNT_DESCRIPTION)
+    total_cameras: int = Field(description=CAMERA_COUNT_DESCRIPTION)
     incidents_today: int = Field(description=ALARM_FRAME_COUNT_DESCRIPTION)
-    detection_status: Literal["active", "idle", "degraded", "starting"]
+    detection_status: Literal["active", "idle", "degraded", "starting"] = Field(description=DETECTION_STATUS_DESCRIPTION)
     uptime_percent: float = Field(description=NONFAILED_JOB_RATIO_DESCRIPTION)
     active_jobs: int
     total_jobs: int
     refreshed_at: datetime
 
     # camelCase (UI convenience)
-    activeCameras: int
-    totalCameras: int
+    activeCameras: int = Field(description=CAMERA_COUNT_DESCRIPTION)
+    totalCameras: int = Field(description=CAMERA_COUNT_DESCRIPTION)
     incidentsToday: int = Field(description=ALARM_FRAME_COUNT_DESCRIPTION)
-    detectionStatus: Literal["active", "idle", "degraded", "starting"]
+    detectionStatus: Literal["active", "idle", "degraded", "starting"] = Field(description=DETECTION_STATUS_DESCRIPTION)
     uptimePercent: float = Field(description=NONFAILED_JOB_RATIO_DESCRIPTION)
 
 
@@ -479,10 +498,10 @@ class FrontendIncidentList(BaseModel):
 
 class FrontendCameraStatus(BaseModel):
     id: str
-    status: Literal["online", "warning", "offline"]
+    status: Literal["online", "warning", "offline"] = Field(description=CAMERA_STATUS_DESCRIPTION)
     stream_url: str | None = None
-    last_job_id: str | None = None
-    last_seen_at: datetime | None = None
+    last_job_id: str | None = Field(default=None, description="Latest retained job for this source ID.")
+    last_seen_at: datetime | None = Field(default=None, description=CAMERA_LAST_SEEN_DESCRIPTION)
 
 
 class CameraLatestFrame(BaseModel):
