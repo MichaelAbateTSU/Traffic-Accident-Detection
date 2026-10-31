@@ -42,6 +42,16 @@ validated with synthetic trajectories, not calibrated accident accuracy or a
 new real-model deployment measurement. See the
 [timing contract and quantitative regressions](../README.md#experimental-trusted-constant-fps-scorer).
 
+The API's signal names are compatibility labels, not verified event evidence:
+`sudden_stop` does not require preceding motion, `collision_iou` is a
+projected-box overlap/convergence candidate rather than proof of physical
+contact, `post_collision` can score immediately using pre-candidate history,
+and `traffic_anomaly` can count the candidate participants themselves without
+a separate nearby vehicle or an actual speed drop. These semantics apply in
+both scorer modes; missing-observation policies differ. See
+[signal definitions](../README.md#detection-signals). Do not interpret a
+heuristic score as an accident probability or a causal explanation of an alarm.
+
 ## Render Free feasibility
 
 **The current backend cannot safely run on Render Free.** No Render backend service

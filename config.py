@@ -56,7 +56,7 @@ GRACE_PERIOD_FRAMES = 10
 # Speed (pixels/frame) below which a track is considered stopped
 STOP_SPEED_THRESHOLD = 5.0
 
-# How many consecutive frames the speed must stay below threshold
+# Low-speed history length; no preceding motion or speed drop is required.
 STOP_MIN_FRAMES = 5
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ DECEL_WINDOW_FRAMES = 8
 # ---------------------------------------------------------------------------
 # Signal: collision / box overlap
 # ---------------------------------------------------------------------------
-# Minimum IoU between two tracks' boxes to trigger a collision event
+# Minimum projected-box IoU for a candidate, not verified physical contact.
 COLLISION_IOU_THRESHOLD = 0.10
 
 # Minimum number of frames over which centre-distance must shrink
@@ -82,22 +82,22 @@ COLLISION_APPROACH_FRAMES = 6
 # ---------------------------------------------------------------------------
 # Signal: post-collision behaviour
 # ---------------------------------------------------------------------------
-# Speed threshold below which a track is "stationary" after a collision
+# Low-speed threshold for a current/recent projected-box candidate.
 POST_COLLISION_STATIONARY_SPEED = 4.0
 
-# Direction change (degrees) considered "erratic" post-collision
+# Recent direction-change threshold; history can precede the candidate.
 POST_COLLISION_DIRECTION_CHANGE_DEG = 70.0
 
-# How many frames after an overlap to look for post-collision behaviour
+# Candidate memory span; current-frame candidates are scored immediately.
 POST_COLLISION_WINDOW_FRAMES = 15
 
 # ---------------------------------------------------------------------------
-# Signal: traffic anomaly (nearby vehicles also slowing)
+# Signal: traffic anomaly (nearby low-speed tracks)
 # ---------------------------------------------------------------------------
 # Pixel radius around the event region to search for affected tracks
 ANOMALY_RADIUS_PX = 250
 
-# Minimum number of additional stopped/slow tracks to trigger the signal
+# Minimum low-speed tracks near the candidate, INCLUDING its participants.
 ANOMALY_MIN_SLOW_TRACKS = 2
 
 # ---------------------------------------------------------------------------

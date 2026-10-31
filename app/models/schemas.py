@@ -46,13 +46,13 @@ class DetectRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SignalValues(BaseModel):
-    """The five raw accident signals computed by AccidentScorer."""
+    """Five heuristic image-space signals, not verified accident evidence."""
 
-    sudden_stop: float = Field(ge=0.0, le=1.0)
+    sudden_stop: float = Field(ge=0.0, le=1.0, description="Low-speed history; no preceding motion or speed drop required.")
     abrupt_decel: float = Field(ge=0.0, le=1.0)
-    collision_iou: float = Field(ge=0.0, le=1.0)
-    post_collision: float = Field(ge=0.0, le=1.0)
-    traffic_anomaly: float = Field(ge=0.0, le=1.0)
+    collision_iou: float = Field(ge=0.0, le=1.0, description="Projected-box overlap/convergence candidate, not proof of physical collision.")
+    post_collision: float = Field(ge=0.0, le=1.0, description="Current/recent candidate with low speed or direction change; history may precede candidate.")
+    traffic_anomaly: float = Field(ge=0.0, le=1.0, description="Nearby low-speed tracks, including candidate participants; no separate vehicle or speed drop required.")
 
 
 class DetectionEvent(BaseModel):
@@ -79,7 +79,7 @@ class DetectionEvent(BaseModel):
     )
     involved_track_ids: list[int] = Field(
         default_factory=list,
-        description="DeepSORT track IDs of vehicles involved in the event.",
+        description="DeepSORT track IDs attributed to the heuristic event, not verified collision participants.",
     )
     signal_values: SignalValues
 
