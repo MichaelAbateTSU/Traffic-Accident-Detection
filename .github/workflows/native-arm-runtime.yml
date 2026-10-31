@@ -91,6 +91,7 @@ jobs:
           name: carla-numerical-results
           path: |
             ${{ runner.temp }}/carla-results/structure.json
+            ${{ runner.temp }}/carla-results/detection-record.json
             ${{ runner.temp }}/carla-results/legacy/summary.json
             ${{ runner.temp }}/carla-results/legacy/carla_sideswipe/frames.jsonl
             ${{ runner.temp }}/carla-results/constant-fps/summary.json

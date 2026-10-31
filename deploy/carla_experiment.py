@@ -128,11 +128,49 @@ def main(verify_only=False):
                                       "Paired legacy/experimental constant20FPS; no threshold tuning."])],
     )
     path = Path("/results/local-manifest.json")
+    manifest.clips[0].labels = labels[:141]
     path.write_text(manifest.model_dump_json(indent=2))
+    from unittest.mock import patch
+    import pipeline
+    original_yolo = pipeline._run_yolo
+    captured = {}
+    numerical = []
     for mode, enabled in [("legacy", False), ("constant-fps", True)]:
-        evaluate(path, Path("/results") / mode, "test", 232, 232,
-                 "/models/yolo11n.pt", max_frame_side=1280,
-                 experimental_constant_fps=enabled)
+        index = 0
+        def capture(model, frame):
+            nonlocal index
+            detections = original_yolo(model, frame)
+            if index in (126, 127, 140):
+                captured[index] = [
+                    {"xyxy_processed": list(d[:4]),
+                     "xyxy_source": [coordinate * 1.5 for coordinate in d[:4]],
+                     "confidence": d[4], "class_name": d[5]}
+                    for d in detections
+                ]
+            index += 1
+            return detections
+        with patch.object(pipeline, "_run_yolo", capture):
+            result = evaluate(path, Path("/results") / mode, "test", 141, 141,
+                              "/models/yolo11n.pt", max_frame_side=1280,
+                              experimental_constant_fps=enabled)
+        if index != 141 or set(captured) != {126, 127, 140}:
+            raise ValueError("Detection observation capture was incomplete")
+        frame_rows = [json.loads(line) for line in
+                      (Path("/results") / mode / "carla_sideswipe/frames.jsonl").read_text().splitlines()]
+        numerical.append({
+            "mode": mode, "runtime_provenance": result["provenance"],
+            "elapsed_seconds": result["clips"][0]["elapsed_seconds"],
+            "processed_frames": index,
+            "source_dimensions": [1920, 1080], "processed_dimensions": [1280, 720],
+            "coordinate_system": "xyxy pixels, origin top-left; source = processed * 1.5",
+            "same_pass_capture": "Original _run_yolo return observed unchanged before tracking; scores joined from that same evaluation",
+            "frames": [{"source_frame": i, "decoded_pts_seconds": timestamps[i],
+                        "score": frame_rows[i]["score"], "alarm": frame_rows[i]["accident_detected"],
+                        "ground_truth": labels[i], "detections": captured[i]}
+                       for i in (126, 127, 140)]
+        })
+        captured = {}
+    Path("/results/detection-record.json").write_text(json.dumps(numerical, indent=2) + "\n")
 
 
 if __name__ == "__main__":
