@@ -7,7 +7,7 @@ import time
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
@@ -640,3 +640,70 @@ def test_closed_queue_keyed_admission_is_terminal_and_never_requeues(queued_clie
     assert replay.status_code == 200 and replay.json()["status"] == "failed"
     assert replay.json()["job_id"] == jid and not observed["order"]
     assert len(store.all_jobs()) == 1
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_unreserved_http_410_fences_delayed_post_after_rollback_and_restart(queued_client, monkeypatch, tmp_path, method):
+    import app.api.detect as detect_module
+    client, _, _, _, _ = queued_client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    monkeypatch.setattr("app.services.job_store._utcnow", lambda: now)
+    path = str(tmp_path / "http-expiry.sqlite3")
+    store = JobStore(database_path=path, start_reaper=False)
+    headers = {"Idempotency-Key": f"v1.{int(now.timestamp()) - 43200}.{uuid.uuid4()}"}
+    body = {"stream_url": SOURCES[0]}
+    monkeypatch.setattr(detect_module, "job_store", store)
+    schedule = Mock()
+    monkeypatch.setattr(client.app.state.detection_queue, "submit", schedule)
+    now += timedelta(hours=12, seconds=1)
+    observation = now
+    response = (client.get("/detection-submissions/v1", headers=headers) if method == "get"
+                else client.post("/detection-submissions/v1", json=body, headers=headers))
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "idempotency_key_expired"
+    if method == "get":
+        assert response.headers["cache-control"] == "no-store"
+    now -= timedelta(hours=12)
+    delayed = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert delayed.status_code == 410
+    assert not store.all_jobs() and not store._submission_receipts
+    assert store._submission_clock == observation
+    store._db.close()
+    restarted = JobStore(database_path=path, start_reaper=False)
+    try:
+        monkeypatch.setattr(detect_module, "job_store", restarted)
+        delayed = client.post("/detection-submissions/v1", json=body, headers=headers)
+        assert delayed.status_code == 410
+        assert delayed.json()["detail"]["code"] == "idempotency_key_expired"
+        assert not restarted.all_jobs() and not restarted._submission_receipts
+        schedule.assert_not_called()
+    finally:
+        restarted._db.close()
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_expiry_fence_write_failure_is_visible_not_a_definitive_410(queued_client, monkeypatch, method):
+    client, store, _, _, _ = queued_client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    monkeypatch.setattr("app.services.job_store._utcnow", lambda: now)
+    previous_clock = store._submission_clock
+    headers = {"Idempotency-Key": f"v1.{int(now.timestamp()) - 86401}.{uuid.uuid4()}"}
+    now += timedelta(seconds=10)
+    store._db.execute(
+        "CREATE TRIGGER reject_expiry_fence BEFORE INSERT ON submission_clock "
+        "BEGIN SELECT RAISE(ABORT, 'expiry fence write failed'); END"
+    )
+    store._db.commit()
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    response = (client.get("/detection-submissions/v1", headers=headers) if method == "get"
+                else client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]}, headers=headers))
+    assert response.status_code == 500
+    assert response.json()["detail"] == "An internal server error occurred."
+    if method == "get":
+        assert response.headers["cache-control"] == "no-store"
+    assert store._submission_clock == previous_clock
+    observed_at = store._db.execute("SELECT observed_at FROM submission_clock").fetchone()[0]
+    assert datetime.fromisoformat(observed_at) == previous_clock
+    assert not store.all_jobs() and not store._submission_receipts
+    store._db.execute("DROP TRIGGER reject_expiry_fence")
+    store._db.commit()

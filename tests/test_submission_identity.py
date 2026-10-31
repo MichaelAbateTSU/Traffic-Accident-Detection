@@ -308,3 +308,36 @@ def test_receipt_cleanup_and_clock_fence_roll_back_together(store, monkeypatch):
     assert store._db.execute("SELECT count(*) FROM submission_receipts").fetchone()[0] == 1
     observed_at = store._db.execute("SELECT observed_at FROM submission_clock").fetchone()[0]
     assert datetime.fromisoformat(observed_at) == previous_clock
+
+
+@pytest.mark.parametrize("operation", ["find", "lookup", "create"])
+def test_unreserved_expiry_observation_fences_rollback_before_cleanup_and_restart(tmp_path, monkeypatch, operation):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    monkeypatch.setattr("app.services.job_store._utcnow", lambda: now)
+    path = str(tmp_path / "expiry-observation.sqlite3")
+    store = JobStore(database_path=path, start_reaper=False)
+    key = key_at(now - timedelta(hours=12))
+    now += timedelta(hours=12, seconds=1)
+    observation = now
+    attempt = {
+        "find": lambda: store.find_submission(key),
+        "lookup": lambda: store.lookup_submission(key, SOURCE, 5, False),
+        "create": lambda: create(store, key),
+    }[operation]
+    with pytest.raises(SubmissionIdentityError) as error:
+        attempt()
+    assert error.value.code == "idempotency_key_expired"
+    # No reaper/admission occurred after expiry; no reservation ever existed.
+    now -= timedelta(hours=12)
+    with pytest.raises(SubmissionIdentityError) as error:
+        create(store, key)
+    assert error.value.code == "idempotency_key_expired"
+    assert store._submission_clock == observation
+    assert not store.all_jobs() and not store._submission_receipts
+    store._db.close()
+    restarted = JobStore(database_path=path, start_reaper=False)
+    with pytest.raises(SubmissionIdentityError) as error:
+        create(restarted, key)
+    assert error.value.code == "idempotency_key_expired"
+    assert restarted._submission_clock == observation and not restarted.all_jobs()
+    restarted._db.close()

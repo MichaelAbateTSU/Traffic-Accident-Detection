@@ -315,7 +315,12 @@ the time-stamped expired identity is rejected, not reused.
 Receipt cleanup atomically persists a nondecreasing server-time watermark with
 deletion. Subsequent identity validation uses the later of wall time and that
 watermark, including after restart: clock rollback cannot revive a key already
-past the cleanup boundary. Large clock jumps can therefore fail closed early
+past the cleanup boundary. Expired-key validation also persists the effective
+time before returning a definitive `idempotency_key_expired` 410, even for an
+identity never reserved and before the reaper runs. GET does not schedule or
+reserve work, but may advance this clock-safety metadata. If that persistence
+fails, the API returns a visible server error rather than a definitive 410.
+Large clock jumps can therefore fail closed early
 and reject identities until wall time catches up; they do not promise 24 hours
 of real elapsed availability. Keep the clock synchronized.
 

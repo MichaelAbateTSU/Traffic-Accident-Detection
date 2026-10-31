@@ -271,7 +271,7 @@ class JobStore:
         """Read-only identity reconciliation; absence is not an admission fence."""
         with self._lock:
             self._require_submission_storage()
-            identity, expires_at = identify_submission(key, max(_utcnow(), self._submission_clock))
+            identity, expires_at = self._identify_submission_locked(key, _utcnow())
             return self._lookup_submission_locked(identity, None), expires_at
 
     def lookup_submission(
@@ -279,7 +279,7 @@ class JobStore:
     ) -> tuple[DetectionResult | None, datetime]:
         with self._lock:
             self._require_submission_storage()
-            identity, expires_at = identify_submission(key, max(_utcnow(), self._submission_clock))
+            identity, expires_at = self._identify_submission_locked(key, _utcnow())
             fingerprint = request_fingerprint(stream_url, max_frames, save_frames)
             return self._lookup_submission_locked(identity, fingerprint), expires_at
 
@@ -291,7 +291,7 @@ class JobStore:
         with self._lock:
             self._require_submission_storage()
             now = _utcnow()
-            identity, expires_at = identify_submission(key, max(now, self._submission_clock))
+            identity, expires_at = self._identify_submission_locked(key, now)
             fingerprint = request_fingerprint(stream_url, max_frames, save_frames)
             existing = self._lookup_submission_locked(identity, fingerprint)
             if existing is not None:
@@ -315,6 +315,22 @@ class JobStore:
             self._jobs[job.job_id] = job
             self._submission_receipts[identity] = (fingerprint, job.job_id, expires_at)
             return job, False, expires_at
+
+    def _identify_submission_locked(self, key: str, now: datetime) -> tuple[str, datetime]:
+        now = max(now, self._submission_clock)
+        try:
+            return identify_submission(key, now)
+        except SubmissionIdentityError as exc:
+            if exc.code == "idempotency_key_expired" and now > self._submission_clock:
+                # A definitive 410 must remain true after rollback, even when
+                # the identity was never reserved and the reaper has not run.
+                assert self._db is not None
+                with self._db:
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO submission_clock VALUES (1, ?)", (now.isoformat(),),
+                    )
+                self._submission_clock = now
+            raise
 
     def _require_submission_storage(self) -> None:
         if self._db is None or not any(
