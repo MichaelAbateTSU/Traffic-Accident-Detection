@@ -9,11 +9,14 @@ Internally the scorer maintains a per-track history deque of TrackSnapshot
 objects covering the last HISTORY_WINDOW_FRAMES observations by default. Five heuristic
 signals are computed from that history:
 
-    1. sudden_stop       – speed drops and stays near-zero for several frames
-    2. abrupt_decel      – high negative mean acceleration over a short window
-    3. collision_iou     – two tracks' boxes overlap AND were approaching each other
-    4. post_collision    – after overlap, track is stationary or moves erratically
-    5. traffic_anomaly   – multiple nearby tracks also slow near the event region
+    1. sudden_stop       – low-speed history; no preceding motion is required
+    2. abrupt_decel      – scalar-speed decrease over a short window
+    3. collision_iou     – projected-box overlap with recent centre convergence
+    4. post_collision    – current/recent candidate with low speed or direction change
+    5. traffic_anomaly   – nearby low-speed tracks, including candidate participants
+
+A projected-box candidate is not proof of physical collision. Neither a
+moving-to-stopped transition nor a separate nearby vehicle is required.
 
 Each signal is normalised to [0, 1] and combined with a weighted sum.
 The raw score is smoothed with an EMA and then gated with hysteresis to
@@ -127,7 +130,7 @@ class AccidentScorer:
         self._smoothed_score: float = 0.0
         self._accident_detected: bool = False
 
-        # Track the most recent collision event for post-collision scoring
+        # Remember projected-box candidates, not verified physical collisions.
         # Maps frozenset({tid_a, tid_b}) → frame_idx of last overlap
         self._collision_events: dict[frozenset, int | float] = {}
 
@@ -364,12 +367,12 @@ class AccidentScorer:
 
     def _signal_sudden_stop(self) -> float:
         """
-        Returns the fraction of tracks that have been near-stationary for at
-        least STOP_MIN_FRAMES frames.  Clipped to [0, 1].
+        Count low-speed histories, normalised as min(1, count / 2).
+        No moving-to-stopped transition is required. Legacy uses observation
+        count; experimental mode requires current uninterrupted reference time.
         """
         stopped_count = sum(self._contributes_sudden_stop(rec) for rec in self._records.values())
-        # Normalise: 1 stopped vehicle out of N = partial signal
-        # Full signal (1.0) when ≥2 vehicles are stopped simultaneously
+        # One qualifying history gives 0.5; two or more give 1, regardless of total tracks.
         return min(1.0, stopped_count / 2.0)
 
     def _contributes_sudden_stop(self, rec: _TrackRecord) -> bool:
@@ -423,10 +426,11 @@ class AccidentScorer:
         self, frame_idx: int | float
     ) -> tuple[float, list[tuple[int, int]]]:
         """
-        Returns (signal_value, list_of_colliding_pairs).
+        Returns (signal_value, list_of_projected_overlap_candidate_pairs).
+        Image-space overlap/convergence does not verify physical contact.
 
         A pair qualifies when:
-          - current IoU > COLLISION_IOU_THRESHOLD
+          - current IoU >= COLLISION_IOU_THRESHOLD
           - centres were converging in recent frames
         """
         iou_threshold = config.COLLISION_IOU_THRESHOLD
@@ -464,7 +468,7 @@ class AccidentScorer:
                 if not was_converging:
                     continue
 
-                # Record the collision event for post-collision scoring
+                # Record this frame's candidate before computing post_collision.
                 pair_key = frozenset({tid_a, tid_b})
                 self._collision_events[pair_key] = frame_idx
 
@@ -521,7 +525,9 @@ class AccidentScorer:
         col_pairs: list[tuple[int, int]],
     ) -> float:
         """
-        Look for stationary or erratic motion after a recorded collision.
+        Score current/recent projected-box candidates using low speed or
+        recent direction changes. History can precede the first candidate;
+        no later observation or verified collision is required.
         """
         window = config.POST_COLLISION_WINDOW_FRAMES
         stationary_thresh = config.POST_COLLISION_STATIONARY_SPEED
@@ -529,11 +535,11 @@ class AccidentScorer:
 
         max_signal = 0.0
 
-        # Current collisions carry a base signal
+        # Current candidates carry a base signal.
         if col_pairs:
             max_signal = 0.3
 
-        # Past collisions: check if involved tracks are still anomalous
+        # Includes candidates recorded in this same update.
         expired = []
         for pair_key, event_frame in self._collision_events.items():
             if frame_idx - event_frame > window + (1e-9 if self._experimental else 0):
@@ -552,11 +558,11 @@ class AccidentScorer:
                     continue
 
                 last = rec.history[-1]
-                # Post-collision stationary
+                # Current low speed, without requiring a speed drop.
                 if last.speed < stationary_thresh:
                     max_signal = max(max_signal, 0.8)
 
-                # Post-collision erratic direction change
+                # Recent direction history is not restricted to after the candidate.
                 recent = self._recent(rec, 5)
                 if len(recent) >= 3:
                     angle = self._direction_change(recent)
@@ -580,14 +586,15 @@ class AccidentScorer:
                 max_angle = max(max_angle, _direction_change_deg([previous, last]))
         return max_angle
 
-    # ---- Signal 5: Traffic anomaly (nearby vehicles slowing) ----------
+    # ---- Signal 5: Traffic anomaly (nearby low-speed tracks) ----------
 
     def _signal_traffic_anomaly(
         self,
         col_pairs: list[tuple[int, int]],
     ) -> float:
         """
-        Count how many vehicles near the collision region are also slowing.
+        Count low-speed tracks near the candidate centre, including candidate
+        participants. No speed drop or separate nearby vehicle is required.
         """
         if not col_pairs and not self._collision_events:
             return 0.0
@@ -626,7 +633,7 @@ class AccidentScorer:
     def _event_centre(
         self, col_pairs: list[tuple[int, int]]
     ) -> tuple[Optional[float], Optional[float]]:
-        """Return the average centre of all currently colliding track pairs."""
+        """Return the mean centre of current candidate participants or remembered ones."""
         if not col_pairs:
             # Fall back to last known collision event participants
             if not self._collision_events:

@@ -32,6 +32,91 @@ def tracks_at(positions):
     ]
 
 
+@pytest.mark.parametrize("experimental", [False, True])
+@pytest.mark.parametrize("offset,expected", [(9, 0.5), (9.0001, 0)])
+def test_projected_overlap_threshold_is_inclusive(experimental, offset, expected):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    def boxes(distance):
+        return [
+            SimpleNamespace(track_id=tid, to_tlbr=lambda x=x: [x, 0, x + 11, 10])
+            for tid, x in [(1, 0), (2, distance)]
+        ]
+    scorer.update(boxes(20), 0)
+    # At offset 9: intersection=20, union=200, IoU=0.1 exactly.
+    _, _, meta = scorer.update(boxes(offset), 1)
+    assert meta["signal_values"]["collision_iou"] == expected
+    assert bool(scorer._collision_events) == bool(expected)
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+def test_stop_signal_requires_low_speed_history_not_a_moving_to_stopped_transition(experimental):
+    scorer, rows = sample(lambda _: [(0, 0)], 10, seconds=0.5, experimental=experimental)
+    assert all(snap.speed == 0 for snap in scorer._records[1].history)
+    assert rows[-1][3]["signal_values"]["sudden_stop"] == 0.5
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+@pytest.mark.parametrize("missing", ["absent", "predicted_only", "source_gap"])
+def test_stationary_evidence_missing_observation_policy_is_mode_specific(experimental, missing):
+    scorer, _ = sample(lambda _: [(0, 0)], 10, seconds=0.5, experimental=experimental)
+    current = tracks_at([(0, 0)])
+    idx = 6
+    if missing == "absent":
+        current = []
+    elif missing == "predicted_only":
+        current[0].time_since_update = 1
+    else:
+        idx = 8
+    _, _, meta = scorer.update(current, idx)
+    assert meta["signal_values"]["sudden_stop"] == (0 if experimental else 0.5)
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+def test_first_overlap_candidate_can_immediately_use_low_speed_and_count_only_participants(experimental):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    for idx in range(4):
+        _, _, meta = scorer.update(tracks_at([(-30 + 5 * idx, 0), (30 - 5 * idx, 0)]), idx)
+        if idx < 3:
+            assert meta["signal_values"]["collision_iou"] == 0
+            assert meta["signal_values"]["post_collision"] == 0
+            assert meta["signal_values"]["traffic_anomaly"] == 0
+    assert len(scorer._records) == 2
+    assert set(scorer._collision_events.values()) == {3}
+    assert meta["signal_values"]["collision_iou"] > 0
+    assert meta["signal_values"]["post_collision"] == 0.8
+    assert meta["signal_values"]["traffic_anomaly"] == 0.5
+    assert meta["signal_values"]["sudden_stop"] == 0
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+def test_first_overlap_candidate_can_use_direction_changes_before_candidate(experimental):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    for idx, x in enumerate([-300, -100, -250, -60, -10]):
+        _, _, meta = scorer.update(tracks_at([(x, 0), (-x, 0)]), idx)
+        if idx < 4:
+            assert not scorer._collision_events
+            assert meta["signal_values"]["post_collision"] == 0
+    assert set(scorer._collision_events.values()) == {4}
+    assert all(rec.history[-1].speed > config.POST_COLLISION_STATIONARY_SPEED
+               for rec in scorer._records.values())
+    assert meta["signal_values"]["post_collision"] == 1
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+def test_candidate_stationary_and_nearby_signals_do_not_use_absent_tracks_experimentally(experimental):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    for idx in range(4):
+        scorer.update(tracks_at([(-30 + 5 * idx, 0), (30 - 5 * idx, 0)]), idx)
+    _, _, meta = scorer.update([], 4)
+    assert meta["signal_values"]["post_collision"] == (0 if experimental else 0.8)
+    assert meta["signal_values"]["traffic_anomaly"] == (0 if experimental else 0.5)
+    assert scorer._collision_events  # Candidate memory intentionally survives absence.
+
+
 def steady(t):
     return [(100 * t, 0)]
 

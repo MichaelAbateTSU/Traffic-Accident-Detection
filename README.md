@@ -1259,7 +1259,7 @@ All detection parameters live in `config.py`. Edit once; every module picks up t
 | Parameter | Default | Description |
 |---|---|---|
 | `STOP_SPEED_THRESHOLD` | `5.0 px/frame` | Speed below which a vehicle is "stopped" |
-| `COLLISION_IOU_THRESHOLD` | `0.10` | Min box IoU to flag a collision event |
+| `COLLISION_IOU_THRESHOLD` | `0.10` | Min projected-box IoU for a convergence/overlap candidate, not verified contact |
 | `EMA_ALPHA` | `0.30` | Score smoothing (higher = faster response) |
 | `HIGH_THRESHOLD` | `0.65` | Score that sets `accident_detected = True` |
 | `LOW_THRESHOLD` | `0.40` | Score that clears `accident_detected` (hysteresis) |
@@ -1294,11 +1294,44 @@ are not physical acceleration measurements or accident probabilities.
 
 | Signal | Weight | Description |
 |---|---|---|
-| `sudden_stop` | 0.25 | Track speed drops and stays near zero |
+| `sudden_stop` | 0.25 | Low-speed history; no preceding motion or speed drop required |
 | `abrupt_decel` | 0.20 | High negative mean acceleration over a short window |
-| `collision_iou` | 0.30 | Two tracks' boxes overlap **and** were converging |
-| `post_collision` | 0.15 | After overlap: track stationary or moving erratically |
-| `traffic_anomaly` | 0.10 | Multiple nearby vehicles also slowing near the event region |
+| `collision_iou` | 0.30 | Projected boxes overlap with recent centre convergence; not verified physical collision |
+| `post_collision` | 0.15 | Current/recent candidate with low speed or recent direction changes, possibly from before the candidate |
+| `traffic_anomaly` | 0.10 | Nearby low-speed tracks, including candidate participants; no separate nearby vehicle or speed drop required |
+
+**Signal names are retained for compatibility, not guarantees of event
+semantics.** `sudden_stop` can be nonzero for a vehicle stationary throughout
+its observed history: it counts qualifying histories and returns
+`min(1, stopped_count / 2)`, not a fraction of all tracks. There is no explicit
+moving-to-stopped transition check. A projected-box overlap/convergence
+candidate can arise without physical contact; perspective, occlusion and
+tracking errors remain possible.
+
+`post_collision` is computed after recording **this update's** overlap
+candidate. It has a 0.3 current-candidate base and can immediately reach 0.8
+from low speed, or a higher direction-change value using history that predates
+the first candidate. It does not require an observation after the candidate,
+nor prove that the candidate caused the motion. `traffic_anomaly` tests current
+low speed, not actual slowing, and includes the candidate's own tracks in its
+radius count; the default two-track minimum can be met by the two participants
+alone, producing 0.5 without any separate nearby vehicle.
+
+These semantics hold in legacy and experimental constant-FPS modes. Their
+timing/observation rules still differ: legacy may score retained or
+predicted-only tracks and preserve low-speed history across gaps; experimental
+mode excludes absent/predicted-only observations, restarts history after gaps,
+requires the reference-time stop span, and needs a velocity observation before
+counting a nearby low-speed track. Remembered candidate metadata can survive
+absence until expiry, but experimental absent tracks supply no current
+positive signals. These distinctions do not establish the cause of any real
+or simulated alarm.
+
+Deterministic public-update characterizations cover stationary-from-first-
+observation histories, same-frame candidate scoring from low speed or
+pre-candidate direction changes, participant-only nearby counts, and
+mode-specific gap/prediction behavior in `tests/test_scorer_timing.py`. They
+bypass inference to isolate the predicates, not measure accident accuracy.
 
 **Scoring:**
 
