@@ -200,13 +200,14 @@ def run_detection_job(
     """
     logger.info("Job started  job_id=%s  max_frames=%d", job_id, max_frames)
 
-    job_store.update(job_id, status="running", frames=[])
+    started_at = _utcnow()
+    t_job_start = time.monotonic()
+    job_store.update(job_id, status="running", started_at=started_at, frames=[])
 
     events: list[DetectionEvent] = []
     frame_images: list[FrameImages] = []
     frames_processed = 0
     peak_confidence = 0.0
-    t_job_start = time.monotonic()
 
     # ------------------------------------------------------------------
     # INTEGRATION POINT — instantiate fresh tracker + scorer per job.

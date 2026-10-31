@@ -66,6 +66,7 @@ def _to_job_summary(job, request: Request) -> JobSummary:
         stream_url=job.stream_url,
         camera_id=_extract_camera_id(job.stream_url),
         created_at=job.created_at,
+        started_at=job.started_at,
         completed_at=job.completed_at,
         frames_processed=job.frames_processed,
         peak_confidence=job.peak_confidence,
@@ -160,6 +161,7 @@ async def get_job_status(job_id: str, request: Request) -> JobStatusResponse:
         progress=progress_percent,
         updated_at=job.completed_at or datetime.now(tz=timezone.utc),
         created_at=job.created_at,
+        started_at=job.started_at,
         completed_at=job.completed_at,
     )
     return JobStatusResponse(
