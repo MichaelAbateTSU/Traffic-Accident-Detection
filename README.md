@@ -243,6 +243,17 @@ COCO-trained vehicle detection, not an accident-trained classifier.
 
 Poll for job status and results.
 
+`created_at` is admission time; optional `started_at` is the actual UTC processing
+start and is `null` until processing starts. `started_at` is also included in job
+list/status and incident detail projections and persisted with the job.
+`DetectionEvent.timestamp_sec` remains elapsed processing wall-clock time from
+that start (including initialization), not media time or time spent queued.
+Incident `detected_at`, job detection times, incident date filters/sorting,
+dashboard incidents and CSV use `started_at + timestamp_sec`. Legacy stored
+jobs without `started_at` retain the earlier `created_at + timestamp_sec`
+estimate because their actual processing start cannot be recovered; restarting
+does not invent a start time or reinterpret their elapsed seconds.
+
 **Response `200 OK`:**
 
 ```json

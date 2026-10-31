@@ -64,8 +64,9 @@ def _extract_camera_id(stream_url: str) -> str:
     return parsed.netloc or "unknown-camera"
 
 
-def _event_detected_at(created_at: datetime, timestamp_sec: float) -> datetime:
-    return created_at + timedelta(seconds=float(timestamp_sec))
+def _event_detected_at(job: DetectionResult, timestamp_sec: float) -> datetime:
+    # Old persisted jobs have no recoverable processing start; retain their estimate.
+    return (job.started_at or job.created_at) + timedelta(seconds=float(timestamp_sec))
 
 
 def _parse_incident_id(incident_id: str) -> tuple[str, int] | None:
@@ -106,7 +107,7 @@ def _build_incident_record(
         "event": event,
         "camera_id": camera_id,
         "status": status,
-        "detected_at": _event_detected_at(job.created_at, event.timestamp_sec),
+        "detected_at": _event_detected_at(job, event.timestamp_sec),
         "detection_type": "accident",
         "resolved_at": resolved_at,
         "note": note,
