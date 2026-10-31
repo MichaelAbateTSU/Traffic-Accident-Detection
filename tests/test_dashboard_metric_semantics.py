@@ -65,3 +65,29 @@ def test_openapi_describes_metric_aliases_and_frame_records(client):
             assert "not distinct accidents" in schemas[model]["properties"][field]["description"]
         for field in ("uptime_percent", "uptimePercent"):
             assert "Not measured service uptime" in schemas[model]["properties"][field]["description"]
+
+
+def test_openapi_describes_incident_status_as_workflow_state(client):
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    for model in ("IncidentSummary", "FrontendIncident"):
+        props = schemas[model]["properties"]
+        assert "not an operator-review" in props["status"]["description"]
+        for field in ("manually_updated", "manuallyUpdated"):
+            assert "override" in props[field]["description"]
+
+
+def test_default_status_follows_job_state_and_override_wins(client):
+    from types import SimpleNamespace
+    from app.services.job_store import _build_incident_record
+
+    event = SimpleNamespace(frame_idx=0, timestamp_sec=0.0)
+    job = job_store.create("https://cams.example.com/cam-s.m3u8")
+    expect = {"pending": "active", "running": "active", "complete": "resolved", "failed": "resolved"}
+    for state, status in expect.items():
+        job.status = state
+        record = _build_incident_record(job, event, "cam-s", {})
+        assert (record["status"], record["manually_updated"]) == (status, False)
+    job.status = "running"
+    override = {"status": "resolved", "resolved_at": datetime.now(timezone.utc), "note": "n"}
+    record = _build_incident_record(job, event, "cam-s", {f"{job.job_id}:0": override})
+    assert (record["status"], record["manually_updated"]) == ("resolved", True)

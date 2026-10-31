@@ -208,6 +208,18 @@ class ApiMeta(BaseModel):
 # Stats models
 # ---------------------------------------------------------------------------
 
+INCIDENT_STATUS_DESCRIPTION = (
+    "Workflow state, not an operator-review or physical-accident outcome. By default "
+    "'active' while the source job is pending/running and 'resolved' once the job "
+    "has finished (complete or failed). A PATCH override takes precedence "
+    "(see manually_updated). Neither value establishes that an operator reviewed the "
+    "event or that a real accident was cleared."
+)
+MANUALLY_UPDATED_DESCRIPTION = (
+    "True when a PATCH /incidents/{id} override exists for this record, so status, "
+    "resolved_at and note come from that override rather than the job-state default."
+)
+
 ALARM_FRAME_COUNT_DESCRIPTION = (
     "Retained alarm-active frame records detected from UTC midnight through now, "
     "including consecutive frames and resolved records; not distinct accidents or episodes."
@@ -260,7 +272,7 @@ class IncidentSummary(BaseModel):
     cameraId: str
     detection_type: str = "accident"
     type: str = "accident"
-    status: Literal["active", "resolved"]
+    status: Literal["active", "resolved"] = Field(description=INCIDENT_STATUS_DESCRIPTION)
     resolved: bool
     detected_at: datetime
     detectedAt: datetime
@@ -275,8 +287,8 @@ class IncidentSummary(BaseModel):
     resolved_at: datetime | None = None
     resolvedAt: datetime | None = None
     note: str | None = None
-    manually_updated: bool = False
-    manuallyUpdated: bool = False
+    manually_updated: bool = Field(default=False, description=MANUALLY_UPDATED_DESCRIPTION)
+    manuallyUpdated: bool = Field(default=False, description=MANUALLY_UPDATED_DESCRIPTION)
 
 
 class IncidentUpdateRequest(BaseModel):
@@ -433,7 +445,7 @@ class FrontendIncident(BaseModel):
     type: str
 
     # state / time
-    status: Literal["active", "resolved"]
+    status: Literal["active", "resolved"] = Field(description=INCIDENT_STATUS_DESCRIPTION)
     resolved: bool
     detected_at: datetime
     detectedAt: datetime
@@ -452,8 +464,8 @@ class FrontendIncident(BaseModel):
     resolved_at: datetime | None = None
     resolvedAt: datetime | None = None
     note: str | None = None
-    manually_updated: bool = False
-    manuallyUpdated: bool = False
+    manually_updated: bool = Field(default=False, description=MANUALLY_UPDATED_DESCRIPTION)
+    manuallyUpdated: bool = Field(default=False, description=MANUALLY_UPDATED_DESCRIPTION)
 
 
 class FrontendIncidentList(BaseModel):

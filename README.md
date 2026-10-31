@@ -388,7 +388,7 @@ Paginated incident feed derived from detection events.
 | `page` | integer | `1` | Page number |
 | `page_size` | integer | `20` | Items per page (`1..200`) |
 | `sort` | string | `-detected_at` | `-detected_at`, `detected_at`, `-confidence`, `confidence` |
-| `status` | string | none | `active` or `resolved` |
+| `status` | string | none | `active` or `resolved` (workflow state; see below) |
 | `job_id` | string | none | Filter incidents for one job |
 | `camera_id` | string | none | Filter by camera identifier |
 | `detection_type` | string | none | Currently `accident` |
@@ -642,6 +642,8 @@ GET /jobs/{job_id}/detections?detail=full&page=1&page_size=50
 ```
 
 ---
+
+**Incident status semantics.** By default an incident is `active` while its source job is pending/running and `resolved` once the job has finished (complete or failed). A `PATCH` override takes precedence, and `manually_updated`/`manuallyUpdated` is `true` when one exists. Status does not establish that an operator reviewed the event or that a physical accident was cleared.
 
 ### `PATCH /incidents/{incident_id}`
 
