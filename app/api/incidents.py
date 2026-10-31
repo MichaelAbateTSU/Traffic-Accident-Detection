@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import io
+import unicodedata
 from datetime import datetime
 from typing import Literal
 
@@ -98,6 +99,21 @@ def _iso(value: datetime | None) -> str:
     return value.isoformat() if value else ""
 
 
+def _spreadsheet_safe(value: str) -> str:
+    index = 0
+    has_control = False
+    while index < len(value):
+        char = value[index]
+        control = unicodedata.category(char).startswith("C")
+        if not char.isspace() and not control:
+            break
+        has_control = has_control or control
+        index += 1
+    if value[index:].startswith(("=", "+", "-", "@")) or has_control:
+        return "'" + value
+    return value
+
+
 @router.get(
     "/export",
     summary="Export incidents as CSV (same filters as GET /incidents, no pagination)",
@@ -127,8 +143,7 @@ async def export_incidents(
         start_time=start_time,
         end_time=end_time,
     )
-    _, total = job_store.list_events_paginated(page=1, page_size=1, **filters)
-    records, _ = job_store.list_events_paginated(page=1, page_size=max(total, 1), **filters)
+    records, _ = job_store.list_events_paginated(page_size=None, **filters)
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -137,11 +152,11 @@ async def export_incidents(
         event = rec["event"]
         writer.writerow(
             [
-                rec["incident_id"],
-                rec["job"].job_id,
-                rec["camera_id"],
-                rec["detection_type"],
-                rec["status"],
+                _spreadsheet_safe(rec["incident_id"]),
+                _spreadsheet_safe(rec["job"].job_id),
+                _spreadsheet_safe(rec["camera_id"]),
+                _spreadsheet_safe(rec["detection_type"]),
+                _spreadsheet_safe(rec["status"]),
                 _iso(rec["detected_at"]),
                 event.confidence_score,
                 event.raw_score,
@@ -149,7 +164,7 @@ async def export_incidents(
                 event.timestamp_sec,
                 " ".join(str(t) for t in event.involved_track_ids),
                 _iso(rec.get("resolved_at")),
-                rec.get("note") or "",
+                _spreadsheet_safe(rec.get("note") or ""),
             ]
         )
 

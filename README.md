@@ -621,6 +621,8 @@ Returns the same envelope as `GET /incidents/{incident_id}`. All incident payloa
 
 Downloads incidents as `text/csv` (`Content-Disposition: attachment; filename="incidents.csv"`). Accepts the same filter and sort parameters as `GET /incidents`, without pagination.
 
+Each export uses a single filtered/sorted job-and-override snapshot, so concurrent updates cannot truncate it through a stale count. Text cells that could be interpreted as spreadsheet formulas (`=`, `+`, `-`, `@`, including after leading whitespace/control characters), or start with control characters, are prefixed with an apostrophe. Ordinary text and numeric columns are unchanged; JSON incident notes retain their original values.
+
 Columns: `incident_id, job_id, camera_id, detection_type, status, detected_at, confidence_score, raw_score, frame_idx, timestamp_sec, involved_track_ids, resolved_at, note` (`involved_track_ids` is space-separated).
 
 ```bash

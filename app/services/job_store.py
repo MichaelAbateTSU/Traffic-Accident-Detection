@@ -257,11 +257,11 @@ class JobStore:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         page: int = 1,
-        page_size: int = 20,
+        page_size: int | None = 20,
         sort: str = "-detected_at",
     ) -> tuple[list[dict], int]:
         """
-        Return flattened incident/event records with pagination.
+        Return one filtered/sorted snapshot; page_size=None disables pagination.
 
         Record fields:
             incident_id, job, event, camera_id, status, detected_at, detection_type
@@ -303,6 +303,8 @@ class JobStore:
         flattened.sort(key=key_fn, reverse=reverse)
 
         total = len(flattened)
+        if page_size is None:
+            return flattened, total
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         return flattened[start_idx:end_idx], total

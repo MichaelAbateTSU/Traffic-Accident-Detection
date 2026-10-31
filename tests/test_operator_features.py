@@ -224,6 +224,66 @@ def test_export_csv_empty_has_header_only(client):
     ]
 
 
+def test_export_uses_one_snapshot_despite_concurrent_updates(client, monkeypatch):
+    job = _seed_job("https://cams.example.com/cam-a.m3u8", events=[_event(0, 0.8), _event(1, 0.9)])
+    iid = f"{job.job_id}:0"
+    client.patch(f"/incidents/{iid}", json={"status": "resolved", "note": "Original"})
+    original = job_store.list_events_paginated
+    calls = []
+
+    def snapshot_then_update(**kwargs):
+        records, total = original(**kwargs)
+        calls.append(kwargs)
+        job_store.update(job.job_id, events=[_event(0, 0.8), _event(1, 0.9), _event(2, 1.0)])
+        job_store.set_incident_status(iid, status="active", note="Changed")
+        return records, total
+
+    monkeypatch.setattr(job_store, "list_events_paginated", snapshot_then_update)
+    response = client.get("/incidents/export", params={"camera_id": "cam-a", "sort": "-confidence"})
+    assert response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert [row["incident_id"] for row in rows] == [f"{job.job_id}:1", iid]
+    assert rows[1]["note"] == "Original" and rows[1]["status"] == "resolved"
+    assert len(calls) == 1 and calls[0]["page_size"] is None
+    monkeypatch.setattr(job_store, "list_events_paginated", original)
+    listed = client.get("/incidents", params={"page_size": 1, "sort": "-confidence"}).json()
+    assert len(listed["data"]) == 1
+    assert listed["meta"]["pagination"]["total_items"] == 3
+    assert listed["data"][0]["incident_id"] == f"{job.job_id}:2"
+
+
+@pytest.mark.parametrize(("note", "escaped"), [
+    ("Reviewed", False), ('needs "review", soon', False), ("", False),
+    (" ordinary text ", False), ("Line one\nline two", False), ("O'Brien", False),
+    ("=SUM(1,2)", True), ("+cmd", True), ("-1+2", True), ("@SUM(A1)", True),
+    (" \t=SUM(1,2)", True), ("\r\n+cmd", True), ("\tordinary text", True),
+    (" \tordinary text", True),
+    ("\x00=1", True), ("\x01 @SUM(A1)", True), ("\u200b=1", True),
+    ("\u00a0=1", True),
+])
+def test_export_escapes_formula_like_notes_only(client, note, escaped):
+    job = _seed_job("https://cams.example.com/cam-a.m3u8", events=[_event(0, 0.8)])
+    iid = f"{job.job_id}:0"
+    assert client.patch(f"/incidents/{iid}", json={"status": "resolved", "note": note}).status_code == 200
+    response = client.get("/incidents/export")
+    assert response.status_code == 200
+    row = list(csv.DictReader(io.StringIO(response.text)))[0]
+    assert row["note"] == ("'" + note if escaped else note)
+    assert row["confidence_score"] == row["raw_score"] == "0.8"
+    assert row["frame_idx"] == "0" and row["timestamp_sec"] == "0.0"
+    assert row["camera_id"] == "cam-a"
+    assert client.get(f"/incidents/{iid}").json()["data"]["note"] == note
+
+
+def test_export_escapes_untrusted_camera_text(client):
+    job = _seed_job("https://cams.example.com/=SUM(1,2).m3u8", events=[_event(0, 0.8)])
+    response = client.get("/incidents/export", params={"camera_id": "=SUM(1,2)"})
+    assert response.status_code == 200
+    row = list(csv.DictReader(io.StringIO(response.text)))[0]
+    assert row["camera_id"] == "'=SUM(1,2)"
+    assert row["incident_id"] == f"{job.job_id}:0"
+
+
 # ---------------------------------------------------------------------------
 # Camera latest frame
 # ---------------------------------------------------------------------------
