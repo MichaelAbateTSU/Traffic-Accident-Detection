@@ -929,6 +929,10 @@ An alarm only before the annotated onset is **not** a post-onset collision
 detection. `clip_confusion`/`clip_recall` describe any alarm anywhere in a clip;
 `post_onset_alarm` and `post_onset_positive_clip_hit_rate` describe the separate
 onset-based check. Neither is calibrated probability or population accuracy.
+Both `post_onset_alarm` and the legacy `post_onset_positive_clip_hit_rate` count
+any active observation at/after onset, including an alarm that began earlier
+and remained active. They can be positive without any newly observed transition
+after onset and must not be interpreted as onset-triggered collision detection.
 The compatibility field `first_alarm_after_annotated_onset_delay_seconds` measures
 the first **active sampled frame** at/after onset, not a new alarm beginning.
 An alarm already active before impact can therefore produce zero delay.

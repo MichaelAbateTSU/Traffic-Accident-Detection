@@ -2,7 +2,16 @@
 
 import pytest
 
-from evaluate_accidents import clip_metrics
+from evaluate_accidents import aggregate_metrics, clip_metrics
+
+
+def test_legacy_post_onset_hit_counts_spanning_alarm_without_new_transition():
+    result = clip_metrics([None] * 4, [True] * 4, 10, 1, .2)
+    assert result["post_onset_alarm"] is True
+    assert result["first_alarm_after_annotated_onset_delay_seconds"] == 0
+    assert result["observed_false_to_true_alarm_transitions"] == []
+    assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] is None
+    assert aggregate_metrics([result])["post_onset_positive_clip_hit_rate"] == 1
 
 
 @pytest.mark.parametrize("flags,onset,active_delay,transition_delay,pre,last_pre", [
