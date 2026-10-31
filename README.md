@@ -362,6 +362,10 @@ Dashboard-oriented aggregate metrics with metadata envelope.
 
 ### `GET /incidents`
 
+`bounding_box` / `boundingBox` is `[x1, y1, x2, y2]` in processed-frame pixels (after any
+production downscale; origin top-left), clipped to the visible frame; it is `null` when the
+region is unavailable or entirely outside the frame. Raw tracker/scorer regions are not altered.
+
 An "incident" is one retained processed frame while the heuristic alarm is
 active, identified by `job_id:frame_idx`. Consecutive active frames remain
 separate records, including when hysteresis holds the alarm below the high
