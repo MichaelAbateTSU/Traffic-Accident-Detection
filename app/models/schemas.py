@@ -248,6 +248,22 @@ class IncidentSummary(BaseModel):
     boundingBox: list[float] | None = None
     involved_track_ids: list[int] = Field(default_factory=list)
     involvedTrackIds: list[int] = Field(default_factory=list)
+    resolved_at: datetime | None = None
+    resolvedAt: datetime | None = None
+    note: str | None = None
+    manually_updated: bool = False
+    manuallyUpdated: bool = False
+
+
+class IncidentUpdateRequest(BaseModel):
+    """Body accepted by PATCH /incidents/{incident_id}."""
+
+    status: Literal["active", "resolved"]
+    note: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional operator note stored with the incident.",
+    )
 
 
 class IncidentDetail(IncidentSummary):
@@ -403,6 +419,13 @@ class FrontendIncident(BaseModel):
     involved_track_ids: list[int] = Field(default_factory=list)
     involvedTrackIds: list[int] = Field(default_factory=list)
 
+    # operator workflow
+    resolved_at: datetime | None = None
+    resolvedAt: datetime | None = None
+    note: str | None = None
+    manually_updated: bool = False
+    manuallyUpdated: bool = False
+
 
 class FrontendIncidentList(BaseModel):
     items: list[FrontendIncident]
@@ -415,6 +438,34 @@ class FrontendCameraStatus(BaseModel):
     stream_url: str | None = None
     last_job_id: str | None = None
     last_seen_at: datetime | None = None
+
+
+class CameraLatestFrame(BaseModel):
+    """Most recent processed frame available for a camera."""
+
+    camera_id: str
+    cameraId: str
+    job_id: str
+    jobId: str
+    frame_index: int = Field(ge=0)
+    frameIndex: int = Field(ge=0)
+    image_url: str | None = Field(default=None, description="Raw captured frame URL.")
+    imageUrl: str | None = None
+    annotated_url: str | None = Field(
+        default=None,
+        description="Best annotated frame URL (pipeline output, else tracker overlay).",
+    )
+    annotatedUrl: str | None = None
+    captured_at: datetime
+    capturedAt: datetime
+    job_status: Literal["pending", "running", "complete", "failed"]
+    jobStatus: Literal["pending", "running", "complete", "failed"]
+
+
+class CameraLatestFrameResponse(BaseModel):
+    data: CameraLatestFrame
+    meta: ApiMeta
+    error: ApiError | None = None
 
 
 class FrontendDashboardResponse(BaseModel):

@@ -592,10 +592,77 @@ GET /jobs/{job_id}/detections?detail=full&page=1&page_size=50
 
 ---
 
+### `PATCH /incidents/{incident_id}`
+
+Resolve or reopen an incident, optionally attaching an operator note (≤ 500 chars). Operator overrides take precedence over the job-derived status everywhere incidents appear (`/incidents`, `/incidents/{id}`, `/incidents/export`, `/dashboard`) and are dropped when the source job is reaped.
+
+```bash
+curl -X PATCH http://localhost:8000/incidents/3fa85f64-5717-4562-b3fc-2c963f66afa6:42 \
+     -H "Content-Type: application/json" \
+     -d '{"status": "resolved", "note": "Tow truck dispatched"}'
+```
+
+Returns the same envelope as `GET /incidents/{incident_id}`. All incident payloads include:
+
+| Field | Description |
+|---|---|
+| `resolved_at` / `resolvedAt` | When the incident was resolved (operator time, or job completion time by default); `null` while active |
+| `note` | Last operator note; sending `note: null`/omitting it keeps the previous note |
+| `manually_updated` / `manuallyUpdated` | `true` once an operator has changed the status |
+
+---
+
+### `GET /incidents/export`
+
+Downloads incidents as `text/csv` (`Content-Disposition: attachment; filename="incidents.csv"`). Accepts the same filter and sort parameters as `GET /incidents`, without pagination.
+
+Columns: `incident_id, job_id, camera_id, detection_type, status, detected_at, confidence_score, raw_score, frame_idx, timestamp_sec, involved_track_ids, resolved_at, note` (`involved_track_ids` is space-separated).
+
+```bash
+curl -o incidents.csv "http://localhost:8000/incidents/export?camera_id=SR-60&status=active&sort=-confidence"
+```
+
+---
+
+### `GET /cameras/{camera_id}/latest-frame`
+
+Returns the most recent processed frame for a camera (the highest-index frame of the newest job that has frames). `404` when no frames exist yet.
+
+```json
+{
+  "data": {
+    "camera_id": "SR-60",
+    "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "frame_index": 4,
+    "image_url": "/artifacts/3fa85f64-5717-4562-b3fc-2c963f66afa6/capture/000004.jpg",
+    "annotated_url": "/artifacts/3fa85f64-5717-4562-b3fc-2c963f66afa6/pipeline_output/000004.jpg",
+    "captured_at": "2026-03-24T15:10:00Z",
+    "job_status": "complete"
+  },
+  "meta": { "request_id": "…", "timestamp": "…", "duration_ms": 0.4 },
+  "error": null
+}
+```
+
+camelCase aliases (`cameraId`, `jobId`, `frameIndex`, `imageUrl`, `annotatedUrl`, `capturedAt`, `jobStatus`) are included. Image URLs are rooted at the API host; clients on another origin should prefix them with the API base URL.
+
+---
+
+### Running the tests
+
+```bash
+pip install fastapi pydantic pydantic-settings httpx pytest numpy
+pytest -q
+```
+
+The test suite stubs `ultralytics`, `deep_sort_realtime`, and (if missing) `cv2`, so it runs without a GPU or model weights.
+
+---
+
 ### Error behavior
 
-- `404` for unknown `job_id` and `incident_id`.
-- `422` for invalid query parameters (for example `page=0`, `min_confidence=1.2`).
+- `404` for unknown `job_id`, `incident_id`, or a camera with no processed frames.
+- `422` for invalid query parameters (for example `page=0`, `min_confidence=1.2`) or invalid PATCH bodies.
 - Legacy endpoints (`/detect-accident`, `/jobs/{job_id}`, `/health`) retain their original response shapes.
 
 ---

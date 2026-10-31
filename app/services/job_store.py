@@ -57,6 +57,52 @@ def _event_detected_at(created_at: datetime, timestamp_sec: float) -> datetime:
     return created_at + timedelta(seconds=float(timestamp_sec))
 
 
+def _parse_incident_id(incident_id: str) -> tuple[str, int] | None:
+    if ":" not in incident_id:
+        return None
+    raw_job_id, raw_frame = incident_id.split(":", 1)
+    try:
+        return raw_job_id, int(raw_frame)
+    except ValueError:
+        return None
+
+
+def _build_incident_record(
+    job: DetectionResult,
+    event,
+    camera_id: str,
+    overrides: dict[str, dict],
+) -> dict:
+    """
+    Flatten a job event into an incident record.
+
+    Status defaults to 'active' while the source job is running and 'resolved'
+    once it finishes; an operator override (PATCH /incidents/{id}) always wins.
+    """
+    incident_id = f"{job.job_id}:{event.frame_idx}"
+    override = overrides.get(incident_id)
+    if override is not None:
+        status = override["status"]
+        resolved_at = override["resolved_at"]
+        note = override["note"]
+    else:
+        status = "active" if job.status in ("pending", "running") else "resolved"
+        resolved_at = job.completed_at if status == "resolved" else None
+        note = None
+    return {
+        "incident_id": incident_id,
+        "job": job,
+        "event": event,
+        "camera_id": camera_id,
+        "status": status,
+        "detected_at": _event_detected_at(job.created_at, event.timestamp_sec),
+        "detection_type": "accident",
+        "resolved_at": resolved_at,
+        "note": note,
+        "manually_updated": override is not None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -77,6 +123,8 @@ class JobStore:
     def __init__(self, ttl_seconds: int | None = None) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, DetectionResult] = {}
+        # Operator overrides keyed by incident_id ("<job_id>:<frame_idx>").
+        self._incident_overrides: dict[str, dict] = {}
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.job_ttl_seconds
         self._start_reaper()
 
@@ -214,6 +262,7 @@ class JobStore:
         """
         with self._lock:
             jobs = list(self._jobs.values())
+            overrides = dict(self._incident_overrides)
 
         flattened: list[dict] = []
         for job in jobs:
@@ -222,31 +271,21 @@ class JobStore:
             cam = _extract_camera_id(job.stream_url)
             if camera_id and cam != camera_id:
                 continue
-            incident_status = "active" if job.status in ("pending", "running") else "resolved"
-            if status and incident_status != status:
-                continue
             for event in job.events:
                 dtype = "accident"
                 if detection_type and detection_type != dtype:
                     continue
                 if min_confidence is not None and event.confidence_score < min_confidence:
                     continue
-                detected_at = _event_detected_at(job.created_at, event.timestamp_sec)
+                record = _build_incident_record(job, event, cam, overrides)
+                if status and record["status"] != status:
+                    continue
+                detected_at = record["detected_at"]
                 if start_time and detected_at < start_time:
                     continue
                 if end_time and detected_at > end_time:
                     continue
-                flattened.append(
-                    {
-                        "incident_id": f"{job.job_id}:{event.frame_idx}",
-                        "job": job,
-                        "event": event,
-                        "camera_id": cam,
-                        "status": incident_status,
-                        "detected_at": detected_at,
-                        "detection_type": dtype,
-                    }
-                )
+                flattened.append(record)
 
         reverse = sort.startswith("-")
         key = sort.lstrip("-")
@@ -264,35 +303,66 @@ class JobStore:
 
     def get_incident(self, incident_id: str) -> dict | None:
         """Lookup an incident by its stable '<job_id>:<frame_idx>' identifier."""
-        if ":" not in incident_id:
+        parsed = _parse_incident_id(incident_id)
+        if parsed is None:
             return None
-        raw_job_id, raw_frame = incident_id.split(":", 1)
-        try:
-            frame_idx = int(raw_frame)
-        except ValueError:
-            return None
+        raw_job_id, frame_idx = parsed
 
         with self._lock:
             job = self._jobs.get(raw_job_id)
+            overrides = dict(self._incident_overrides)
         if job is None:
             return None
 
         cam = _extract_camera_id(job.stream_url)
-        incident_status = "active" if job.status in ("pending", "running") else "resolved"
         for event in job.events:
-            if event.frame_idx != frame_idx:
-                continue
-            detected_at = _event_detected_at(job.created_at, event.timestamp_sec)
-            return {
-                "incident_id": incident_id,
-                "job": job,
-                "event": event,
-                "camera_id": cam,
-                "status": incident_status,
-                "detected_at": detected_at,
-                "detection_type": "accident",
-            }
+            if event.frame_idx == frame_idx:
+                return _build_incident_record(job, event, cam, overrides)
         return None
+
+    def set_incident_status(
+        self,
+        incident_id: str,
+        *,
+        status: str,
+        note: str | None = None,
+    ) -> dict | None:
+        """
+        Record an operator status change (and optional note) for an incident.
+
+        Returns the updated incident record, or None if the incident is unknown.
+        Passing note=None keeps any previously stored note.
+        """
+        if self.get_incident(incident_id) is None:
+            return None
+        with self._lock:
+            prev = self._incident_overrides.get(incident_id, {})
+            now = _utcnow()
+            self._incident_overrides[incident_id] = {
+                "status": status,
+                "note": note if note is not None else prev.get("note"),
+                "resolved_at": now if status == "resolved" else None,
+                "updated_at": now,
+            }
+        return self.get_incident(incident_id)
+
+    def latest_frame_for_camera(self, camera_id: str) -> tuple[DetectionResult, object] | None:
+        """
+        Return (job, FrameImages) for the newest processed frame of a camera.
+
+        Considers jobs newest-first and returns the highest-index frame of the
+        first job that has any frames.
+        """
+        with self._lock:
+            jobs = [
+                j for j in self._jobs.values()
+                if _extract_camera_id(j.stream_url) == camera_id and j.frames
+            ]
+        if not jobs:
+            return None
+        job = max(jobs, key=lambda j: j.created_at)
+        frame = max(job.frames, key=lambda f: f.frame_index)
+        return job, frame
 
     def count_incidents_in_range(
         self,
@@ -337,6 +407,10 @@ class JobStore:
             ]
             for jid in expired:
                 del self._jobs[jid]
+            if expired:
+                expired_set = set(expired)
+                for iid in [k for k in self._incident_overrides if k.split(":", 1)[0] in expired_set]:
+                    del self._incident_overrides[iid]
         if expired:
             logger.debug("Reaped %d expired job(s): %s", len(expired), expired)
 

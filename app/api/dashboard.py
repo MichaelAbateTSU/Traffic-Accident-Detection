@@ -85,6 +85,11 @@ def _to_frontend_incident(record: dict) -> FrontendIncident:
         boundingBox=event.bounding_box,
         involved_track_ids=event.involved_track_ids,
         involvedTrackIds=event.involved_track_ids,
+        resolved_at=record.get("resolved_at"),
+        resolvedAt=record.get("resolved_at"),
+        note=record.get("note"),
+        manually_updated=bool(record.get("manually_updated")),
+        manuallyUpdated=bool(record.get("manually_updated")),
     )
 
 
