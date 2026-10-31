@@ -1,6 +1,8 @@
 # Traffic Accident Detection — YOLOv8 + DeepSORT + FastAPI
 
-A production-ready traffic accident detection system that processes live HLS/RTSP camera streams using **YOLOv8** object detection and **DeepSORT** multi-object tracking, exposed as a **REST API** built with FastAPI.
+A traffic accident detection system that processes live HLS/RTSP camera streams using **YOLOv8** object detection and **DeepSORT** multi-object tracking, exposed as a **REST API** built with FastAPI.
+
+For a secure CPU backend on a free remote VM, use the [production deployment guide](deploy/README.md). This repository includes a deployable runtime, not a provisioned or guaranteed always-on cloud service.
 
 ---
 
@@ -33,7 +35,7 @@ The system connects to any OpenCV-compatible video source (HLS stream, RTSP, loc
 - Five-signal weighted accident score with EMA smoothing and hysteresis
 - Non-blocking FastAPI backend — POST a job, poll for results
 - Single shared YOLO model loaded at startup (no per-request reload)
-- Thread-safe in-memory job store with automatic TTL cleanup
+- Thread-safe job store with automatic TTL cleanup and optional durable SQLite
 
 ---
 
@@ -180,10 +182,20 @@ LOG_LEVEL=INFO
 |---|---|---|
 | `YOLO_MODEL` | `yolo11x.pt` | Model weights file |
 | `CORS_ORIGINS` | `*` | Comma-separated frontend origins (`*` = allow all) |
-| `MAX_CONCURRENT_JOBS` | `4` | Rejects new jobs when at capacity (503) |
+| `MAX_CONCURRENT_JOBS` | `10` locally, `1` in production | Inference workers; production always executes one job at a time |
+| `MAX_PENDING_JOBS` | `9` | Production waiting capacity in addition to the single worker; rejects overload with 503 |
 | `JOB_TTL_SECONDS` | `3600` | How long completed job results stay in memory |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `API_PREFIX` | `` | Optional prefix for all routes, e.g. `/api/v1` |
+| `ENVIRONMENT` | `development` | `production` fails startup without a token, explicit HTTPS origins and persistent storage |
+| `API_TOKEN` | empty | Bearer token required on API/artifact routes when set; mandatory in production |
+| `APPROVED_STREAM_URLS` | `[]` | JSON list of exact HTTPS URLs accepted in production |
+| `JOB_DATABASE_PATH` | unset | SQLite jobs/operator state; set to a persistent volume in production |
+| `OUTPUT_DIR` | unset | Override the pipeline's artifact directory |
+| `MAX_RETAINED_JOBS` | `100` | Oldest terminal histories/artifacts are removed at this limit |
+| `MAX_SAVED_FRAMES_PER_JOB` | `300` | Stops saving images at this count without stopping inference |
+| `MAX_SAVED_FRAME_BYTES` | `2000000` | Oversized image writes fail explicitly |
+| `JOB_TIMEOUT_SECONDS` | `300` | Job deadline, checked between frames |
 
 ---
 
@@ -206,7 +218,7 @@ Start an accident detection job against a stream URL.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `stream_url` | string (URL) | required | Any source OpenCV can open: HLS, RTSP, MP4 |
-| `max_frames` | integer | `5` | Consecutive-frame cap, range 1–300. Explicitly request `300` for temporal signals (~30 s at 10 fps, ~10 s at 30 fps). The default preserves existing clients. |
+| `max_frames` | strict integer | `5` | Process 1-300 ordered frames; request a longer sequence for temporal scoring. Processing time is hardware/scene-dependent |
 | `save_frames` | boolean | `false` | Save raw and annotated images to `pipeline_output/` and publish frame URLs; when false, no images are written or published |
 
 The server now honors `max_frames` instead of forcing every job to five frames.

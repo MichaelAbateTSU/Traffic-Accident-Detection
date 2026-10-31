@@ -1,0 +1,104 @@
+name: traffic-detection
+services:
+  api:
+    build: ..
+    image: traffic-detection-cpu:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2
+    mem_limit: 4g
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - detection-data:/data
+    environment:
+      ENVIRONMENT: production
+      API_TOKEN: ${API_TOKEN:?Generate a private operator token}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://michaelabatetsu.github.io}
+      APPROVED_STREAM_URLS: ${APPROVED_STREAM_URLS:?Set approved HTTPS source URLs as JSON}
+      JOB_DATABASE_PATH: /data/jobs.sqlite3
+      OUTPUT_DIR: /data/artifacts
+      YOLO_MODEL: /models/yolo11n.pt
+      MAX_CONCURRENT_JOBS: 1
+      MAX_PENDING_JOBS: 9
+      INFERENCE_THREADS: 2
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-300}
+      MAX_SAVED_FRAMES_PER_JOB: 300
+      MAX_SAVED_FRAME_BYTES: 2000000
+      MAX_FRAME_DIMENSION: 1280
+      MAX_RETAINED_JOBS: 100
+      JOB_ARTIFACT_RETENTION_COUNT: 9
+      JOB_TTL_SECONDS: 86400
+      http_proxy: http://egress:3128
+      https_proxy: http://egress:3128
+      no_proxy: 127.0.0.1,localhost
+    networks:
+      private:
+        ipv4_address: 172.30.0.2
+    depends_on:
+      - egress
+    extra_hosts:
+      - "egress:172.30.0.4"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  egress:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.egress
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    environment:
+      STREAM_HOSTS: ${STREAM_HOSTS:?List every approved camera and segment/CDN hostname}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-300}
+    networks:
+      private:
+        ipv4_address: 172.30.0.4
+      internet: {}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  https:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 256m
+    pids_limit: 64
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set a DNS name pointing at your free VM}
+      ACME_EMAIL: ${ACME_EMAIL:?Set certificate contact email}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      private:
+        ipv4_address: 172.30.0.3
+      internet: {}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  internet: {}
+volumes:
+  detection-data:
+  caddy-data:
+  caddy-config:

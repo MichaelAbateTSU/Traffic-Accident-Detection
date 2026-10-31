@@ -1,28 +1,33 @@
 """
-app/services/job_store.py — Thread-safe in-memory job store.
+app/services/job_store.py — Thread-safe job store with optional durable SQLite.
 
 Jobs are stored as DetectionResult objects keyed by job_id (UUID string).
 A background reaper thread removes jobs that have exceeded their TTL.
 
-Swap the backend for Redis (via redis-py / aioredis) later without touching
-any API layer code — just replace JobStore._jobs with a Redis hash.
+Production persists jobs and operator changes; local development is in memory.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
+import sqlite3
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 from urllib.parse import urlparse
+from pathlib import Path
 
 from app.core.config import settings
 from app.models.schemas import DetectionResult
 
 logger = logging.getLogger(__name__)
 
+class JobCapacityError(RuntimeError):
+    pass
 
 # ---------------------------------------------------------------------------
 # Internal job record
@@ -126,19 +131,76 @@ class JobStore:
     store.all_jobs()                          -> list[DetectionResult]
     """
 
-    def __init__(self, ttl_seconds: int | None = None) -> None:
+    def __init__(
+        self, ttl_seconds: int | None = None, *,
+        database_path: str | None = None, start_reaper: bool = True,
+    ) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, DetectionResult] = {}
         # Operator overrides keyed by incident_id ("<job_id>:<frame_idx>").
         self._incident_overrides: dict[str, dict] = {}
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.job_ttl_seconds
-        self._start_reaper()
+        self._db: sqlite3.Connection | None = None
+        if database_path:
+            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+            self._db = sqlite3.connect(database_path, check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=FULL")
+            self._db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS overrides (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            for jid, payload in self._db.execute("SELECT id, payload FROM jobs"):
+                self._jobs[jid] = DetectionResult.model_validate_json(payload)
+            for iid, payload in self._db.execute("SELECT id, payload FROM overrides"):
+                override = json.loads(payload)
+                for field in ("resolved_at", "updated_at"):
+                    if override.get(field):
+                        override[field] = datetime.fromisoformat(override[field])
+                self._incident_overrides[iid] = override
+            for job in self._jobs.values():
+                if job.status in ("pending", "running"):
+                    job.status = "failed"
+                    job.completed_at = _utcnow()
+                    job.error = "The service restarted before this job finished. Submit a new job."
+                    self._persist_job(job)
+            self._db.commit()
+            self._reap_expired()
+        if start_reaper:
+            self._start_reaper()
+
+    def _persist_job(self, job: DetectionResult) -> None:
+        if self._db is not None:
+            with self._db:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO jobs VALUES (?, ?)",
+                    (job.job_id, job.model_dump_json()),
+                )
+
+    def _delete_job(self, jid: str) -> None:
+        if self._db is not None:
+            with self._db:
+                self._db.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+                self._db.execute("DELETE FROM overrides WHERE id LIKE ?", (f"{jid}:%",))
+        del self._jobs[jid]
+        for iid in [key for key in self._incident_overrides if key.split(":", 1)[0] == jid]:
+            del self._incident_overrides[iid]
+        # Only store-generated UUID directories may be removed.
+        uuid.UUID(jid)
+        import config as pipeline_config
+        folder = Path(settings.output_dir or pipeline_config.OUTPUT_DIR) / jid
+        if folder.exists():
+            try:
+                shutil.rmtree(folder)
+            except OSError:
+                logger.exception("Could not remove expired job artifacts %s", jid)
 
     # ------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------
 
-    def create(self, stream_url: str, *, max_frames: int | None = None, save_frames: bool | None = None) -> DetectionResult:
+    def create(
+        self, stream_url: str, *, max_frames: int | None = None,
+        save_frames: bool | None = None, capacity: int | None = None,
+    ) -> DetectionResult:
         """Create a new job with status='pending' and return it."""
         job = DetectionResult(
             job_id=_new_job_id(),
@@ -149,8 +211,17 @@ class JobStore:
             created_at=_utcnow(),
         )
         with self._lock:
+            active = sum(j.status in ("pending", "running") for j in self._jobs.values())
+            if capacity is not None and active >= capacity:
+                raise JobCapacityError("The running/pending job capacity is exhausted. Please retry later.")
+            while len(self._jobs) >= settings.max_retained_jobs:
+                terminal = [j for j in self._jobs.values() if j.status in ("complete", "failed")]
+                if not terminal:
+                    raise JobCapacityError("The job store is at capacity. Please retry later.")
+                self._delete_job(min(terminal, key=lambda j: j.completed_at or j.created_at).job_id)
+            self._persist_job(job)
             self._jobs[job.job_id] = job
-        logger.debug("Job created  job_id=%s  stream_url=%s", job.job_id, stream_url)
+        logger.debug("Job created  job_id=%s", job.job_id)
         return job
 
     def get(self, job_id: str) -> DetectionResult | None:
@@ -175,6 +246,7 @@ class JobStore:
                 logger.warning("update() called for unknown job_id=%s", job_id)
                 return
             updated = job.model_copy(update=fields)
+            self._persist_job(updated)
             self._jobs[job_id] = updated
 
     def count_running(self) -> int:
@@ -359,12 +431,19 @@ class JobStore:
             resolved_at = None
             if status == "resolved":
                 resolved_at = prev["resolved_at"] if prev["status"] == "resolved" else now
-            self._incident_overrides[incident_id] = {
+            override = {
                 "status": status,
                 "note": note if note is not None else prev["note"],
                 "resolved_at": resolved_at,
                 "updated_at": now,
             }
+            if self._db is not None:
+                with self._db:
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO overrides VALUES (?, ?)",
+                        (incident_id, json.dumps(override, default=lambda value: value.isoformat())),
+                    )
+            self._incident_overrides[incident_id] = override
             return _build_incident_record(job, event, cam, self._incident_overrides)
 
     def latest_frame_for_camera(self, camera_id: str) -> tuple[DetectionResult, object] | None:
@@ -427,11 +506,7 @@ class JobStore:
                 and (now - job.completed_at.timestamp()) > self._ttl
             ]
             for jid in expired:
-                del self._jobs[jid]
-            if expired:
-                expired_set = set(expired)
-                for iid in [k for k in self._incident_overrides if k.split(":", 1)[0] in expired_set]:
-                    del self._incident_overrides[iid]
+                self._delete_job(jid)
         if expired:
             logger.debug("Reaped %d expired job(s): %s", len(expired), expired)
 
@@ -440,4 +515,4 @@ class JobStore:
 # Module-level singleton (shared across the entire application process)
 # ---------------------------------------------------------------------------
 
-job_store = JobStore()
+job_store = JobStore(database_path=settings.job_database_path)

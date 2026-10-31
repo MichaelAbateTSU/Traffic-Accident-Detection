@@ -30,6 +30,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.core.security import AuthenticationMiddleware
+from app.services.detection_queue import DetectionQueue
+from app.services.detection_service import run_detection_job
+from app.services.job_store import job_store
 from app.api import cameras, dashboard, detect, health, incidents, jobs, stats
 
 logger = logging.getLogger(__name__)
@@ -61,18 +65,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from ultralytics import YOLO
         import config as pipeline_config  # root-level config
 
-        logger.info("Loading YOLO model: %s  (this may take a moment…)", pipeline_config.YOLO_MODEL)
-        app.state.model = YOLO(pipeline_config.YOLO_MODEL)
+        import torch
+        torch.set_num_threads(settings.inference_threads)
+        model_path = (
+            settings.yolo_model if "yolo_model" in settings.model_fields_set
+            else pipeline_config.YOLO_MODEL
+        )
+        logger.info("Loading YOLO model: %s", model_path)
+        app.state.model = YOLO(model_path)
+        if settings.environment == "production":
+            from app.core.inference import configure_production_model
+            configure_production_model(app.state.model)
         logger.info("YOLO model loaded successfully.")
     except Exception:
         logger.exception("Failed to load YOLO model — /detect-accident will return 503.")
+        if settings.environment == "production":
+            raise
         app.state.model = None
     # ------------------------------------------------------------------
 
-    yield  # server runs here
-
-    logger.info("Shutting down %s", settings.app_title)
-    app.state.model = None
+    app.state.detection_queue = DetectionQueue(
+        job_store, run_detection_job, max_workers=settings.max_concurrent_jobs,
+    )
+    try:
+        yield
+    finally:
+        logger.info("Shutting down %s", settings.app_title)
+        app.state.detection_queue.close()
+        app.state.model = None
 
 
 # ---------------------------------------------------------------------------
@@ -88,19 +108,21 @@ def create_app() -> FastAPI:
             "YOLOv8 object detection and DeepSORT multi-object tracking."
         ),
         lifespan=lifespan,
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url=None if settings.environment == "production" else "/docs",
+        redoc_url=None if settings.environment == "production" else "/redoc",
+        openapi_url=None if settings.environment == "production" else "/openapi.json",
     )
 
     # ------------------------------------------------------------------
     # CORS — allow the frontend origin(s) configured in settings / .env
     # ------------------------------------------------------------------
+    app.add_middleware(AuthenticationMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.get_cors_origins(),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
         expose_headers=["Content-Disposition"],
     )
 
@@ -132,6 +154,8 @@ def create_app() -> FastAPI:
     import config as pipeline_config  # root-level config
     import os
 
+    if settings.output_dir:
+        pipeline_config.OUTPUT_DIR = settings.output_dir
     os.makedirs(pipeline_config.OUTPUT_DIR, exist_ok=True)
     artifacts_mount = f"{prefix}/artifacts" if prefix else "/artifacts"
     app.mount(

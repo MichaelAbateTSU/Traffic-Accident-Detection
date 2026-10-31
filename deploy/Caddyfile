@@ -1,0 +1,21 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$API_DOMAIN} {
+	request_body {
+		max_size 16KB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Cache-Control "no-store"
+	}
+	reverse_proxy api:8000 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+		}
+	}
+}

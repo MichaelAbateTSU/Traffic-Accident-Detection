@@ -1,0 +1,58 @@
+name: Native ARM CPU runtime
+
+on:
+  push:
+    paths:
+      - ".github/workflows/native-arm-runtime.yml"
+      - "Dockerfile"
+      - "requirements-production-*.txt"
+      - "app/**"
+      - "pipeline.py"
+      - "tracker.py"
+      - "accident_scorer.py"
+      - "config.py"
+      - "deploy/verify_cpu_runtime.py"
+  pull_request:
+    paths:
+      - ".github/workflows/native-arm-runtime.yml"
+      - "Dockerfile"
+      - "requirements-production-*.txt"
+      - "app/**"
+      - "pipeline.py"
+      - "tracker.py"
+      - "accident_scorer.py"
+      - "config.py"
+      - "deploy/verify_cpu_runtime.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-arm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-runtime:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify native architecture and build production image
+        run: |
+          test "$(uname -m)" = aarch64
+          docker build --platform linux/arm64 -t traffic-detection-cpu:ci .
+          test "$(docker image inspect traffic-detection-cpu:ci --format '{{.Architecture}}')" = arm64
+      - name: Verify offline non-root bounded CPU pipeline
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --cpus 2 --memory 4g --pids-limit 128 \
+            --tmpfs /tmp:size=256m,mode=1777 \
+            --tmpfs /data:size=32m,mode=1777 \
+            --mount "type=bind,source=$PWD/deploy/verify_cpu_runtime.py,target=/app/verify_cpu_runtime.py,readonly" \
+            traffic-detection-cpu:ci \
+            python verify_cpu_runtime.py --expected-machine aarch64
