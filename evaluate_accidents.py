@@ -234,6 +234,34 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
     post_onset_frames = None if onset_seconds is None else sum(
         flag and (source_start_frame + i) / fps >= onset_seconds for i, flag in enumerate(detected)
     )
+    timestamps = [(source_start_frame + i) / fps for i in range(len(detected))]
+    pre_indices = [] if onset_seconds is None else [
+        i for i, timestamp in enumerate(timestamps) if timestamp < onset_seconds
+    ]
+    transitions = []
+    for i in range(1, len(detected)):
+        if detected[i] and not detected[i - 1]:
+            lower, upper = timestamps[i - 1], timestamps[i]
+            relation = None
+            if onset_seconds is not None:
+                relation = (
+                    "before_onset" if upper < onset_seconds else
+                    "entirely_at_or_after_onset" if lower >= onset_seconds else
+                    "interval_crosses_or_ends_at_onset"
+                )
+            transitions.append({
+                "previous_inactive_source_frame": source_start_frame + i - 1,
+                "first_active_source_frame": source_start_frame + i,
+                "transition_time_lower_exclusive_seconds": lower,
+                "transition_time_upper_inclusive_seconds": upper,
+                "onset_relation": relation,
+            })
+    first_transition_after = next(
+        (transition for transition in transitions
+         if onset_seconds is not None
+         and transition["transition_time_upper_inclusive_seconds"] >= onset_seconds),
+        None,
+    )
     return {
         "frame_confusion": counts,
         "temporal_metrics_available": dense,
@@ -255,6 +283,19 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
         "post_onset_alarm": None if onset_seconds is None else first_after_onset is not None,
         "first_alarm_after_annotated_onset_delay_seconds": (
             None if first_after_onset is None else first_after_onset - onset_seconds
+        ),
+        "first_observation_alarm_active": detected[0] if detected else None,
+        "alarm_state_before_first_observation": "unknown",
+        "observed_pre_onset_alarm_active": (
+            None if not pre_indices else any(detected[i] for i in pre_indices)
+        ),
+        "last_observed_pre_onset_alarm_active": (
+            detected[pre_indices[-1]] if pre_indices else None
+        ),
+        "observed_false_to_true_alarm_transitions": transitions,
+        "first_observed_false_to_true_at_or_after_onset_delay_seconds": (
+            None if first_transition_after is None else
+            first_transition_after["transition_time_upper_inclusive_seconds"] - onset_seconds
         ),
     }
 
