@@ -24,6 +24,7 @@ COUNTERS = {
     "yolo_calls": 0, "vehicle_detections": 0, "tracker_calls": 0,
     "confirmed_track_observations": 0, "max_confirmed_tracks": 0, "scorer_calls": 0,
     "deep_sort_embedder_calls": 0, "embedded_crop_count": 0, "blocked_write_attempts": 0,
+    "blocked_image_write_attempts": 0,
     "job_finished": False,
     "tracker_initializations": 0, "blocked_write_categories": {},
     "blocked_write_modules": {},
@@ -58,6 +59,7 @@ def serve():
 
     def forbid_image_write(*args, **kwargs):
         COUNTERS["blocked_write_attempts"] += 1
+        COUNTERS["blocked_image_write_attempts"] += 1
         raise RuntimeError("Image/video writes are forbidden in this experiment")
 
     cv2.imwrite = forbid_image_write
@@ -216,7 +218,10 @@ def probe():
         time.sleep(1)
     PROBE_STATE["stage"] = "terminal_job_evidence"
     PROBE_STATE.update(job_status=job["status"], frames_processed=job["frames_processed"],
-                       published_frame_count=len(job["frames"]))
+                       published_frame_count=len(job["frames"]),
+                       peak_heuristic_score=job["peak_confidence"],
+                       accident_detected=job["accident_detected"],
+                       event_count=len(job["events"]))
     error = job.get("error") or ""
     if "PermissionError" in error or "Read-only file system" in error:
         PROBE_STATE["job_error_category"] = "filesystem_write_denied"
@@ -242,7 +247,9 @@ def probe():
     PROBE_STATE["startup_metadata_unchanged"] = startup_unchanged
     assert not job["frames"] and artifact_files == 0 and metadata_only
     assert startup_unchanged and RUNTIME_TEMP.stat().st_mode & 0o222 == 0
-    assert counts["blocked_write_attempts"] == 0
+    # Denied metadata writes do not imply retention: the guard still raises and
+    # inventories must be unchanged. Any attempted image/video write fails.
+    assert counts["blocked_image_write_attempts"] == 0 and counts["job_finished"]
     if job["status"] == "complete":
         assert all(counts[key] == job["frames_processed"]
                    for key in ("yolo_calls", "tracker_calls", "scorer_calls"))

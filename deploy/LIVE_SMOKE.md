@@ -31,6 +31,9 @@ exist only in decoder/process memory.
 The probe checks authentication, rejected unapproved sources, direct egress
 isolation, proxy rejection of an unapproved host, terminal job status, published
 frame count, the empty artifact mount and metadata-only writable data directory.
+Denied metadata-write attempts are explicitly counted, not permitted; a caught
+library metadata-write denial does not fail an otherwise unchanged inventory.
+Any image/video-writer attempt fails the smoke.
 Its safe JSON summary is retained only in Actions logs. Container stdout/stderr
 and raw API errors are suppressed. The controller stops/removes both services
 and networks in `finally`, with an additional always-run workflow cleanup.
