@@ -196,7 +196,7 @@ LOG_LEVEL=INFO
 | `MAX_SAVED_FRAMES_PER_JOB` | `300` | Stops saving images at this count without stopping inference |
 | `MAX_SAVED_FRAME_BYTES` | `2000000` | Oversized image writes fail explicitly |
 | `JOB_TIMEOUT_SECONDS` | `300` | Job deadline, checked between frames |
-| `EXPERIMENTAL_SCORER_SOURCE_FPS` | unset/blank (legacy mode) | Explicit trusted constant FPS for **every** admitted source; enables experimental scoring, never inferred from capture FPS |
+| `EXPERIMENTAL_SCORER_SOURCE_FPS` | unset/blank (legacy mode) | Explicit trusted constant FPS in `(0, 240]` for **every** admitted source; enables experimental scoring, never inferred from capture FPS |
 
 ---
 
@@ -1119,7 +1119,7 @@ remains a separate limitation.
 
 **Opt-in only; legacy is the unchanged default.** This experiment addresses
 measured source-rate unit/window/EMA dependence, not accident accuracy. Select
-a finite positive constant source rate that you have independently established:
+a finite positive constant source rate, at most **240 FPS**, that you have independently established:
 
 ```bash
 # CLI video or contiguous image sequence; 25 is caller-supplied trusted FPS.
@@ -1142,7 +1142,7 @@ flag but assumes **consecutive source frames**, regardless of sleeps between
 reads. Neither CLI nor the API substitutes nominal capture FPS for the
 explicit rate. The evaluator already validates video FPS against the manifest,
 but agreement is not proof of constant frame timing. Missing/zero/negative/
-boolean/nonfinite rates in an explicitly selected scorer timebase fail, as do
+boolean/nonfinite/above-240 rates in an explicitly selected scorer timebase fail, as do
 malformed/nonincreasing source indices. At Python level:
 
 ```python
@@ -1168,6 +1168,12 @@ velocity vectors at a lag of at least one reference tick, rather than an
 arbitrarily short high-FPS interval. Convergence pairs only shared source times.
 Collision-event expiry is 1.5 seconds, and lost-track retention is 1 second,
 with inclusive expiry boundaries as in legacy mode.
+The 240-FPS ceiling matches evaluation manifests and bounds time-window
+history storage without dropping in-window evidence: at 240 FPS the default
+4.9-second history retains 1,177 observations including its boundary.
+Unrestricted extreme rates previously could retain growing histories and
+produce nonfinite motion estimates; unsupported rates now fail consistently
+in the scorer, service settings and CLI.
 
 **Missing observation policy:** skipped source indices or a track absent from
 an intervening update restart that track's motion history on reappearance.
@@ -1179,6 +1185,9 @@ their normal expiry, but post-collision stationary/direction evidence must
 come from a current uninterrupted history. Score EMA decays over skipped
 intervals with zero evidence, then incorporates only the current observation's
 interval. An explicit empty-track update also contributes zero evidence.
+Stop-only event focus selects current observed tracks, not stale retained
+boxes. Intentionally remembered collision participants/regions remain in
+event metadata until their normal expiry; legacy focus selection is unchanged.
 
 Tests preserve **exact dense 10-FPS legacy scores, signals and hysteresis**
 (apart from explicit experimental metadata). Legacy mode, including its gap

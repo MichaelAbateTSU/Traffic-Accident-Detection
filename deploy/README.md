@@ -35,7 +35,7 @@ Public ACME issuance, VM reboot and live-cloud availability remain unverified.
 
 Experimental FPS scoring is **disabled by default**: leave
 `EXPERIMENTAL_SCORER_SOURCE_FPS` blank/unset in `deploy/.env`. Compose forwards
-an explicit value, but enable it only when every admitted source has that
+an explicit value in `(0, 240]`, but enable it only when every admitted source has that
 independently trusted constant rate. Nominal capture FPS is not timing proof;
 mixed rates, VFR and unreported drops are unsupported. This experiment is
 validated with synthetic trajectories, not calibrated accident accuracy or a

@@ -497,7 +497,8 @@ def test_experimental_post_collision_direction_has_reference_time_memory(fps):
     assert abs(last - 1.5) <= 2 / fps + 1e-9
 
 
-@pytest.mark.parametrize("fps", [None, 0, -1, True, False, "25", float("nan"), float("inf"), 1e-323])
+@pytest.mark.parametrize("fps", [None, 0, -1, True, False, "25", float("nan"), float("inf"), 1e-323,
+                                240.001, 241, 1e9, 1e308])
 def test_experimental_constructor_requires_explicit_valid_trusted_timing(fps):
     with pytest.raises(ValueError, match="source_fps"):
         AccidentScorer(timebase="experimental_constant_fps", source_fps=fps)
@@ -557,7 +558,7 @@ def test_experimental_source_indices_are_validated_even_without_tracks(index):
         scorer.update([], index)
 
 
-@pytest.mark.parametrize("fps", [0, -1, True, float("nan"), float("inf")])
+@pytest.mark.parametrize("fps", [0, -1, True, float("nan"), float("inf"), 240.001, 241, 1e9, 1e308])
 def test_service_settings_reject_malformed_experimental_timing(fps):
     from app.core.config import Settings
     with pytest.raises(ValidationError):
@@ -565,7 +566,7 @@ def test_service_settings_reject_malformed_experimental_timing(fps):
 
 
 @pytest.mark.parametrize("entry", ["production", "cli", "snapshot"])
-@pytest.mark.parametrize("fps", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("fps", [0, -1, float("nan"), float("inf"), 240.001, 241, 1e9, 1e308])
 def test_entry_points_explicitly_fail_malformed_experimental_timing(
     entry, fps, fake_components, monkeypatch, tmp_path,
 ):
@@ -684,6 +685,47 @@ def test_service_environment_and_compose_keep_timing_opt_in(monkeypatch):
         root / "deploy" / "compose.yaml"
     ).read_text()
     assert "EXPERIMENTAL_SCORER_SOURCE_FPS=\n" in (root / "deploy" / ".env.example").read_text()
+
+
+def test_experimental_max_supported_rate_has_time_bounded_history_without_dropping_evidence():
+    scorer, rows = sample(steady, 240, seconds=12, experimental=True)
+    history = scorer._records[1].history
+    assert len(history) == 1177  # 4.9 seconds at 240 FPS, inclusive boundary.
+    assert history[-1].frame_idx - history[0].frame_idx == pytest.approx(49)
+    assert all(math.isfinite(snap.speed) and math.isfinite(snap.ax) for snap in history)
+    assert all(row[1] == 0 for row in rows)
+    assert history[1].frame_idx > history[-1].frame_idx - 49
+
+
+@pytest.mark.parametrize("experimental", [False, True])
+@pytest.mark.parametrize("absent_kind", ["absent", "predicted_only"])
+def test_stop_only_focus_uses_current_observations_experimentally(experimental, absent_kind):
+    scorer = (AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+              if experimental else AccidentScorer())
+    for idx in range(5):
+        scorer.update(tracks_at([(0, 0), (1000 + idx, 0)]), idx)
+    current = tracks_at([(1005, 0)])
+    current[0].track_id = 2
+    if absent_kind == "predicted_only":
+        predicted = tracks_at([(0, 0)])
+        predicted[0].time_since_update = 1
+        current += predicted
+    _, _, meta = scorer.update(current, 5)
+    assert meta["signal_values"]["sudden_stop"] == (0.5 if experimental else 1)
+    assert meta["involved_track_ids"] == ([2] if experimental else [1])
+    assert meta["event_region"] == ((985, -20, 1025, 20) if experimental else (-20, -20, 20, 20))
+
+
+def test_experimental_remembered_collision_focus_intentionally_retains_absent_participant():
+    scorer = AccidentScorer(timebase="experimental_constant_fps", source_fps=10)
+    for idx in range(5):
+        scorer.update(tracks_at([(0, 0), (1000 + idx, 0)]), idx)
+    scorer._collision_events[frozenset({1, 2})] = 4
+    current = tracks_at([(1005, 0)])
+    current[0].track_id = 2
+    _, _, meta = scorer.update(current, 5)
+    assert set(meta["involved_track_ids"]) == {1, 2}
+    assert meta["event_region"] == (-20, -20, 1025, 20)
 
 
 @pytest.mark.parametrize("entry", ["production", "cli", "evaluation"])

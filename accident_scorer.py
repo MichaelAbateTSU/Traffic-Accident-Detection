@@ -32,7 +32,7 @@ Experimental constant-FPS timebase
 ---------------------------------
     AccidentScorer(timebase="experimental_constant_fps", source_fps=25)
 
-The caller explicitly trusts a finite positive constant source rate. Capture
+The caller explicitly trusts a finite positive constant source rate <=240 FPS. Capture
 FPS is only nominal; this mode does not infer timing, resample tracks, or support
 variable-rate/dropped-frame streams with unknown source indices. Source indices
 must be nonnegative strictly increasing integers. Motion is measured in the
@@ -112,6 +112,8 @@ class AccidentScorer:
                 raise ValueError("source_fps exceeds the finite timing range") from exc
             if not math.isfinite(source_fps):
                 raise ValueError("Experimental constant-FPS scoring requires a finite positive trusted source_fps")
+            if source_fps > 240:
+                raise ValueError("Experimental source_fps must not exceed the supported 240 FPS ceiling")
             self._reference_step = config.ASSUMED_FPS / source_fps
             if not math.isfinite(self._reference_step) or self._reference_step <= 0:
                 raise ValueError("source_fps must have a representable reference-frame interval")
@@ -674,7 +676,8 @@ class AccidentScorer:
         if not involved_tids:
             # Fall back: find the slowest track as focal point
             slowest = min(
-                self._records.items(),
+                ((tid, rec) for tid, rec in self._records.items()
+                 if self._observed_now(rec)),
                 key=lambda kv: kv[1].history[-1].speed if kv[1].history else 1e9,
                 default=(None, None),
             )
