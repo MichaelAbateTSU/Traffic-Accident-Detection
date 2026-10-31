@@ -2,6 +2,7 @@
 
 import argparse
 import functools
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,8 @@ SOURCE = "https://mcleansfs3.us-east-1.skyvdn.com/rtplive/R2_061/playlist.m3u8"
 HOST = "mcleansfs3.us-east-1.skyvdn.com"
 MAX_FRAMES = 12
 METRICS = Path("/data/metrics.json")
+STARTUP_METADATA = Path("/data/startup_metadata.json")
+RUNTIME_TEMP = Path("/tmp/runtime")
 COUNTERS = {
     "yolo_calls": 0, "vehicle_detections": 0, "tracker_calls": 0,
     "confirmed_track_observations": 0, "max_confirmed_tracks": 0, "scorer_calls": 0,
@@ -28,11 +31,30 @@ COUNTERS = {
 PROBE_STATE = {"stage": "initialization", "job_submitted": False}
 
 
+def startup_metadata_snapshot():
+    return {
+        str(path.relative_to(RUNTIME_TEMP)): {
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in RUNTIME_TEMP.rglob("*") if path.is_file()
+    }
+
+
 def serve():
     import cv2
     import uvicorn
     from app.services import detection_service
     from app import main as main_module
+
+    # PyTorch imports generate Python modules via tempfile even on CPU. No source
+    # has been opened here; freeze this non-media metadata before live admission.
+    startup_tracker = detection_service.DeepSortTracker()
+    STARTUP_METADATA.write_text(json.dumps(startup_metadata_snapshot()))
+    for path in sorted(RUNTIME_TEMP.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    RUNTIME_TEMP.chmod(0o555)
+    del startup_tracker
 
     def forbid_image_write(*args, **kwargs):
         COUNTERS["blocked_write_attempts"] += 1
@@ -52,7 +74,7 @@ def serve():
             permitted = {
                 "/data/jobs.sqlite3", "/data/jobs.sqlite3-wal",
                 "/data/jobs.sqlite3-shm", "/data/jobs.sqlite3-journal",
-                str(METRICS), "/dev/null",
+                str(METRICS), str(STARTUP_METADATA), "/dev/null",
             }
             if os.path.abspath(os.fspath(path)) not in permitted:
                 COUNTERS["blocked_write_attempts"] += 1
@@ -213,10 +235,13 @@ def probe():
     artifact_files = sum(p.is_file() for p in Path("/data/artifacts").rglob("*"))
     metadata_only = all(
         p.name in {"artifacts", "jobs.sqlite3", "jobs.sqlite3-wal", "jobs.sqlite3-shm",
-                   "jobs.sqlite3-journal", "metrics.json"}
+                   "jobs.sqlite3-journal", "metrics.json", "startup_metadata.json"}
         for p in Path("/data").iterdir()
     )
+    startup_unchanged = startup_metadata_snapshot() == json.loads(STARTUP_METADATA.read_text())
+    PROBE_STATE["startup_metadata_unchanged"] = startup_unchanged
     assert not job["frames"] and artifact_files == 0 and metadata_only
+    assert startup_unchanged and RUNTIME_TEMP.stat().st_mode & 0o222 == 0
     assert counts["blocked_write_attempts"] == 0
     if job["status"] == "complete":
         assert all(counts[key] == job["frames_processed"]
@@ -239,6 +264,8 @@ def probe():
         "accident_detected": job["accident_detected"], "event_count": len(job["events"]),
         "published_frame_count": len(job["frames"]), "artifact_file_count": artifact_files,
         "data_contains_only_metadata": metadata_only,
+        "startup_metadata_unchanged": startup_unchanged,
+        "startup_metadata_file_count": len(startup_metadata_snapshot()),
         "authentication_checks_passed": True, "egress_checks_passed": True,
         **counts,
     }
@@ -279,6 +306,7 @@ def orchestrate():
                "--pids-limit", "128", "--ulimit", "core=0", "--log-driver", "none",
                "--no-healthcheck", "--tmpfs", "/data:rw,size=16m,mode=1777",
                "--tmpfs", "/data/artifacts:ro,size=1m,mode=0555",
+               "--tmpfs", "/tmp/runtime:rw,size=16m,uid=10001,gid=10001,mode=0700",
                "--mount", f"type=bind,source={script},target=/app/live_camera_smoke.py,readonly",
                "-e", "API_TOKEN", "-e", "ENVIRONMENT=production",
                "-e", "CORS_ORIGINS=https://michaelabatetsu.github.io",
@@ -286,6 +314,7 @@ def orchestrate():
                "-e", "JOB_DATABASE_PATH=/data/jobs.sqlite3",
                "-e", "OUTPUT_DIR=/data/artifacts", "-e", "MAX_CONCURRENT_JOBS=1",
                "-e", "JOB_ARTIFACT_RETENTION_COUNT=9", "-e", "JOB_TIMEOUT_SECONDS=120",
+               "-e", "TMPDIR=/tmp/runtime",
                "-e", "http_proxy=http://egress:3128", "-e", "https_proxy=http://egress:3128",
                "-e", "no_proxy=127.0.0.1,localhost", "traffic-live-smoke",
                "python", "live_camera_smoke.py", "serve")

@@ -17,7 +17,10 @@ process environment, never printed or written to a file.
 
 One job requests 12 frames, `save_frames=false`, a 120-second production execution
 limit, two CPUs and 4 GiB without swap. The API root filesystem and artifact mount
-are read-only. Only bounded RAM-backed job metadata is writable. Image/video
+are read-only. PyTorch's generated Python import metadata is initialized in a
+private 16 MiB RAM directory before any camera access, then its files/directories
+are made non-writable. A before/after hash inventory must remain unchanged.
+Only bounded RAM-backed job metadata is writable during inference. Image/video
 writers are fail-closed and Python writes outside the numerical metrics/SQLite
 allowlist are denied. Measurement wrappers call the unchanged model, tracker and
 scorer and count their returned results; no tensors, embeddings, coordinates or
