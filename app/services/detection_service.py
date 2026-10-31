@@ -217,7 +217,11 @@ def run_detection_job(
     cap = None
     failure = None
     try:
-        tracker = DeepSortTracker()
+        tracker = (
+            DeepSortTracker()
+            if settings.deepsort_embedder_batch_size == 16
+            else DeepSortTracker(embedder_batch_size=settings.deepsort_embedder_batch_size)
+        )
         scorer = AccidentScorer()
         if settings.environment == "production":
             from app.services.video_source import open_production_video

@@ -96,6 +96,59 @@ changing models or lifting deadlines would not demonstrate readiness. The
 independent durability, egress isolation and idle-lifecycle blockers below
 remain even if an individual short inference succeeds.
 
+### Opt-in DeepSORT forward batch limit
+
+`DEEPSORT_EMBEDDER_BATCH_SIZE` accepts integers **1-16**, default **16**.
+Set it explicitly to `2` in the deployment environment to reduce genuine
+MobileNetV2 forward batches without changing weights, re-identification,
+detection count/order, tracking thresholds or the default configuration.
+Standalone pipeline users can pass
+`DeepSortTracker(embedder_batch_size=2)`; existing no-argument callers retain
+the original behavior. Invalid settings fail validation rather than silently
+falling back. This is a useful **forward-batch control**, not a Render deployment
+configuration or a hard process-memory guarantee.
+
+An isolated comparison with identical experimental one-thread/allocator/
+inference-mode/oneDNN reductions and **19 varied crops** measured batch 2
+completing two successive embedder calls by 49.7 seconds including startup,
+with terminal cgroup high-water **294,174,720 bytes** (about 280.5 MiB).
+Batch 16 completed its first call at 44.9 seconds, high-water 464,355,328 bytes,
+but was OOM-killed during the second call. This establishes a forward-batching
+memory benefit on that fixture, not a bound for the combined YOLO/API process.
+
+The pinned `deep_sort_realtime==1.3.2` constructs its MobileNet embedder with
+16, then exposes `max_batch_size` as a mutable inference limit. Its `predict`
+method **preprocesses every supplied crop before splitting model forwards**.
+Changing the limit bounds forward activation batches, **not the total
+preprocessing/crop memory as detection count grows**; all crops and their
+ordered embeddings are retained. No detection cap or pruning was introduced.
+Real FP32 tests compare 19 varied crops at batch 16 versus 2, in both ordinary
+autograd and inference-mode execution: absolute tolerance `1e-5`, relative
+tolerance `1e-4`, and cosine discrepancy below `1e-6`. Those tolerances permit
+FP32 accumulation-order differences, not arbitrary feature changes. Tests
+also preserve all 19 track IDs/classes/boxes over four updates and identical
+rendered track overlays. These fixtures do not prove assignment equivalence
+for every near-threshold scene or across other architectures.
+
+At local Render-like limits, batch 2 **combined with the earlier experimental
+one-thread/allocator/inference-mode/oneDNN reductions** completed 12 decoded
+preview frames with 12 saved triplets at 101.2 seconds including startup.
+A subsequent genuine 19-crop batch also completed; process exit was successful
+after 127.7 seconds. The recorded cgroup high-water was 474,492,928 bytes
+(about 452.5 MiB), leaving roughly 59.5 MiB below the 512 MiB cap. This is a
+small, hardware-specific margin, not a supported production envelope.
+The 120-frame clip still **failed the unchanged 300-second execution deadline**:
+51 frames and triplets persisted before failure, peak partial heuristic score
+0.2483, recorded high-water 490,635,264 bytes, process exit after 335.4 seconds
+including startup/shutdown. No full-clip score is claimed.
+
+Setting batch 2 **alone** does not eliminate the prior default-runtime OOM:
+both batch 2 and batch 16 were OOM-killed during MobileNet warmup in isolated
+tests retaining original oneDNN/two-thread/autograd behavior. The other
+process-level reductions remain experimental and are not enabled by this
+setting. Storage, enforced egress isolation, spin-down and provider
+authorization blockers are unchanged; no Render backend is provisioned.
+
 Reproduce the basic failure after building the production image:
 
 ```sh

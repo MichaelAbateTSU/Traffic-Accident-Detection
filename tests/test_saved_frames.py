@@ -13,6 +13,18 @@ from app.services.job_store import JobStore, job_store
 from app.core.config import settings
 
 
+def test_worker_passes_opt_in_embedder_batch(frame_pipeline, monkeypatch):
+    _, _, tracker, _, _, _ = frame_pipeline
+    factory = Mock(return_value=tracker)
+    monkeypatch.setattr(detection_service, "DeepSortTracker", factory)
+    monkeypatch.setattr(settings, "deepsort_embedder_batch_size", 2)
+    source = "https://cams.example.com/cam-a.m3u8"
+    job = job_store.create(source)
+    detection_service.run_detection_job(job.job_id, source, 2, object(), save_frames=True)
+    factory.assert_called_once_with(embedder_batch_size=2)
+    assert job_store.get(job.job_id).status == "complete"
+
+
 def test_worker_deadline_and_frame_retention(frame_pipeline, monkeypatch):
     _, _, _, _, _, saver = frame_pipeline
     monkeypatch.setattr(settings, "max_saved_frames_per_job", 1)
