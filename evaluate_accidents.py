@@ -293,7 +293,7 @@ def clip_metrics(labels: list[int | None], detected: list[bool], fps: float,
             detected[pre_indices[-1]] if pre_indices else None
         ),
         "observed_false_to_true_alarm_transitions": transitions,
-        "first_observed_false_to_true_at_or_after_onset_delay_seconds": (
+        "first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds": (
             None if first_transition_after is None else
             first_transition_after["transition_time_upper_inclusive_seconds"] - onset_seconds
         ),

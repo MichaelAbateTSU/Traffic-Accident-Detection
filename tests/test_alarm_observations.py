@@ -16,7 +16,7 @@ def test_spanning_ending_starting_and_reactivated_alarms(flags, onset, active_de
     result = clip_metrics([None] * len(flags), flags, 10, 1, onset)
     for key, expected in [
         ("first_alarm_after_annotated_onset_delay_seconds", active_delay),
-        ("first_observed_false_to_true_at_or_after_onset_delay_seconds", transition_delay),
+        ("first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds", transition_delay),
     ]:
         assert result[key] == (None if expected is None else pytest.approx(expected))
     assert result["observed_pre_onset_alarm_active"] is pre
@@ -41,7 +41,9 @@ def test_transition_brackets_and_onset_boundaries(onset, relation):
         "onset_relation": relation,
     }]
     if onset is None or onset > .2:
-        assert result["first_observed_false_to_true_at_or_after_onset_delay_seconds"] is None
+        assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] is None
+    else:
+        assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] == pytest.approx(.2 - onset)
 
 
 @pytest.mark.parametrize("start,onset", [(20, 2.0), (20, 1.5)])
@@ -51,7 +53,7 @@ def test_initial_active_after_onset_does_not_invent_transition(start, onset):
     assert result["observed_pre_onset_alarm_active"] is None
     assert result["last_observed_pre_onset_alarm_active"] is None
     assert result["observed_false_to_true_alarm_transitions"] == []
-    assert result["first_observed_false_to_true_at_or_after_onset_delay_seconds"] is None
+    assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] is None
     assert result["first_alarm_after_annotated_onset_delay_seconds"] == pytest.approx(2 - onset)
 
 
@@ -64,14 +66,14 @@ def test_nonzero_offset_sparse_labels_and_later_reactivation():
     assert transitions[0]["transition_time_upper_inclusive_seconds"] == 5.75
     assert transitions[0]["onset_relation"] == "entirely_at_or_after_onset"
     assert result["first_alarm_after_annotated_onset_delay_seconds"] == pytest.approx(.45)
-    assert result["first_observed_false_to_true_at_or_after_onset_delay_seconds"] == pytest.approx(.45)
+    assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] == pytest.approx(.45)
     assert result["observed_pre_onset_alarm_active"] is True
 
 
 def test_missing_onset_and_empty_observations_remain_unknown():
     result = clip_metrics([None, None], [False, True], 10)
     assert result["observed_pre_onset_alarm_active"] is None
-    assert result["first_observed_false_to_true_at_or_after_onset_delay_seconds"] is None
+    assert result["first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds"] is None
     empty = clip_metrics([], [], 10, 1, .1)
     assert empty["first_observation_alarm_active"] is None
     assert empty["observed_pre_onset_alarm_active"] is None

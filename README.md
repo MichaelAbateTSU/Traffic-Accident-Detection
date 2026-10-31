@@ -941,7 +941,7 @@ transition. Each pair brackets a possible change in `(previous timestamp,
 active timestamp]`, with source frame indices including `source_start_frame`.
 Its `onset_relation` distinguishes intervals before onset, entirely at/after
 onset, and intervals crossing or ending exactly at onset (whose actual change
-may precede onset). `first_observed_false_to_true_at_or_after_onset_delay_seconds`
+may precede onset). `first_false_to_true_pair_active_observation_at_or_after_onset_delay_seconds`
 uses the first such pair's active observation at/after onset, **not** an exact
 transition delay. It is `null` when onset is missing or no later pair is observed,
 including an alarm spanning onset without reactivation. FPS-derived boundaries
