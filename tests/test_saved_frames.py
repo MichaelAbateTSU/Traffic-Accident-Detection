@@ -9,7 +9,7 @@ import pytest
 from starlette.routing import Mount
 
 from app.services import detection_service
-from app.services.job_store import job_store
+from app.services.job_store import JobStore, job_store
 from app.core.config import settings
 
 
@@ -35,6 +35,28 @@ def test_empty_capture_is_an_explicit_failure(frame_pipeline, monkeypatch):
     detection_service.run_detection_job(job.job_id, source, 2, object())
     result = job_store.get(job.job_id)
     assert result.status == "failed" and "decodable" in result.error
+
+
+def test_300_frame_job_persists_all_results_and_bounded_images(frame_pipeline, monkeypatch, tmp_path):
+    _, output, _, _, _, saver = frame_pipeline
+    database = str(tmp_path / "jobs.sqlite3")
+    store = JobStore(database_path=database, start_reaper=False)
+    monkeypatch.setattr(detection_service, "job_store", store)
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    monkeypatch.setattr(detection_service, "_iter_video", lambda _: iter([frame] * 300))
+    source = "https://cams.example.com/cam-a.m3u8"
+    job = store.create(source, max_frames=300, save_frames=True, capacity=1)
+    detection_service.run_detection_job(job.job_id, source, 300, object(), save_frames=True)
+    result = store.get(job.job_id)
+    assert result.status == "complete" and result.frames_processed == 300
+    assert len(result.events) == len(result.frames) == saver.call_count == 300
+    assert len(list((output / job.job_id).rglob("*.jpg"))) == 900
+    store._db.close()
+    restarted = JobStore(database_path=database, start_reaper=False)
+    recovered = restarted.get(job.job_id)
+    assert recovered.status == "complete" and recovered.max_frames == 300
+    assert len(recovered.events) == len(recovered.frames) == 300
+    restarted._db.close()
 
 
 @pytest.fixture()
