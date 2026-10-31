@@ -92,9 +92,10 @@ def prepare(annotations: Path, media_root: Path, positive_ids: list[str],
         source = _source(media_root, "Normal", clip_id)
         clips.append(Clip(
             clip_id=f"ccd_normal_{clip_id}", group_id=f"ccd_bdd_clip_{clip_id}",
-            split=split, source=str(source), fps=10, labels=[0] * 50, clip_label=0,
+            split=split, source=str(source), fps=10, labels=[None] * 50, clip_label=0,
             annotation_notes=[
-                "All-zero labels derive from the authors' Normal category, not crash binlabels.",
+                "Author Normal category is video-level only; individual frame labels are unknown.",
+                "Clip-level false alarms remain measurable; unknown frames are excluded from frame confusion.",
                 "Normal clips are sampled from BDD100K, not prefixes of CCD crash videos.",
                 "Original BDD recording IDs are unavailable; grouping identifies this clip only.",
                 "Caller-selected evaluation partition; no official train/test membership is asserted.",

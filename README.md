@@ -849,8 +849,11 @@ python evaluate_accidents.py \
 
 `--split` selects a local evaluation partition; it does not assert official
 train/test membership. Crash groups use the author original YouTube numeric ID.
-The normal category supplies all-zero labels independently of crash scores, but
-original BDD recording IDs are unavailable: normal grouping identifies clips,
+The normal category supplies only `clip_label: 0`, not author-provided binary
+frame labels. Its 50 frame labels remain `null`: clip-level false-alarm metrics
+are available, but these frames contribute neither to frame confusion nor to
+labeled-normal hours or temporal false-alarm episodes. Original BDD recording
+IDs are unavailable: normal grouping identifies clips,
 not proven recording-level separation across the entire dataset. Shared numeric
 filenames in `Normal` and `Crash-1500` are distinct clips. Reports expose frame
 confusion, event overlap/latency and false alarms, not calibrated probabilities
