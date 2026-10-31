@@ -52,6 +52,7 @@ def test_production_configuration_fails_closed(overrides):
     ("get", "/incidents"), ("get", "/cameras"),
     ("get", "/artifacts/unknown/capture/000000.jpg"),
     ("post", "/detect-accident"), ("patch", "/incidents/unknown"),
+    ("post", "/detection-submissions/v1"), ("get", "/detection-submissions/v1"),
     ("get", "/docs"), ("get", "/openapi.json"),
 ])
 def test_every_non_health_surface_requires_auth(client, monkeypatch, method, path):
@@ -114,6 +115,12 @@ def test_development_default_is_preserved_and_production_is_single_worker():
     assert configured.max_concurrent_jobs == 1
     assert configured.max_pending_jobs == 9
     assert configured.get_job_admission_capacity() == 10
+
+
+@pytest.mark.parametrize("limit", [0, 100001])
+def test_submission_receipt_capacity_is_bounded(limit):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_submission_receipts=limit)
 
 
 def test_atomic_admission_under_concurrent_calls():

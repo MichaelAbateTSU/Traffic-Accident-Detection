@@ -5,6 +5,8 @@ import sys
 import threading
 import time
 import types
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -212,3 +214,353 @@ def test_cancelled_queued_future_is_terminal_and_skipped(queued_client):
     release.set()
     wait_for(lambda: store.get(last).status == "complete")
     assert observed["order"] == [first, last]
+
+
+def submission_key():
+    return f"v1.{int(time.time())}.{uuid.uuid4()}"
+
+
+def test_lost_acceptance_response_retries_exact_identity_even_at_capacity(queued_client, monkeypatch):
+    client, store, started, release, observed = queued_client
+    key = submission_key()
+    headers = {"Idempotency-Key": key}
+    body = {"stream_url": SOURCES[0]}
+    # Discard the first response as a browser timeout would.
+    original = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert original.status_code == 202 and original.json()["replayed"] is False
+    assert original.json()["status"] == "pending"
+    jid = original.json()["job_id"]
+    assert started.wait(2)
+    monkeypatch.setattr(settings, "max_pending_jobs", 0)
+    replay = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json()["job_id"] == jid and replay.json()["replayed"] is True
+    assert replay.json()["status"] == "running" and replay.json()["error"] is None
+    assert replay.json()["idempotency_expires_at"] == original.json()["idempotency_expires_at"]
+    assert len(store.all_jobs()) == 1 and observed["order"] == [jid]
+    release.set()
+    wait_for(lambda: store.get(jid).status == "complete")
+    with monkeypatch.context() as unavailable:
+        unavailable.setitem(client.app.state._state, "model", None)
+        unavailable.setitem(client.app.state._state, "detection_queue", None)
+        replay = client.post("/detection-submissions/v1", json=body, headers=headers)
+        assert replay.status_code == 200 and replay.json()["status"] == "complete"
+
+
+def test_concurrent_http_retries_schedule_only_one_job(queued_client):
+    client, store, started, _, observed = queued_client
+    key = submission_key()
+    def attempt(_):
+        return client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]},
+                           headers={"Idempotency-Key": key})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(attempt, range(20)))
+    assert sum(response.status_code == 202 for response in responses) == 1
+    assert sum(response.status_code == 200 for response in responses) == 19
+    assert len({response.json()["job_id"] for response in responses}) == 1
+    assert started.wait(2) and len(observed["order"]) == len(store.all_jobs()) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"stream_url": SOURCES[1]}, {"max_frames": 6}, {"save_frames": True},
+])
+def test_key_reuse_with_different_effective_parameters_is_conflict(queued_client, change):
+    client, store, _, _, _ = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 202
+    response = client.post("/detection-submissions/v1", json=body | change, headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "idempotency_key_conflict"
+    assert len(store.all_jobs()) == 1
+
+
+def test_admission_failure_reconciles_original_failed_job(queued_client, monkeypatch):
+    client, store, _, _, observed = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    executor = client.app.state.detection_queue._executor
+    submit_mock = Mock(side_effect=RuntimeError("Executor unavailable"))
+    monkeypatch.setattr(executor, "submit", submit_mock)
+    response = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "inference_admission_failed"
+    replay = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert replay.status_code == 200 and replay.json()["status"] == "failed"
+    assert replay.json()["job_id"] == detail["job_id"]
+    assert replay.json()["error"] == "The inference worker is unavailable."
+    assert submit_mock.call_count == 1 and len(store.all_jobs()) == 1 and not observed["order"]
+
+
+def test_keyed_batch_restart_replays_failed_jobs_without_scheduling(queued_client, tmp_path, monkeypatch):
+    import app.api.detect as detect_module
+    client, store, started, _, observed = queued_client
+    keys = [submission_key() for _ in SOURCES[:9]]
+    accepted = [
+        client.post("/detection-submissions/v1", json={"stream_url": source},
+                    headers={"Idempotency-Key": key}).json()["job_id"]
+        for source, key in zip(SOURCES, keys)
+    ]
+    assert started.wait(2)
+    snapshot_path = str(tmp_path / "restart-keyed.sqlite3")
+    snapshot = sqlite3.connect(snapshot_path)
+    with store._lock:
+        store._db.backup(snapshot)
+    snapshot.close()
+    restarted = JobStore(database_path=snapshot_path, start_reaper=False)
+    monkeypatch.setattr(detect_module, "job_store", restarted)
+    monkeypatch.setitem(client.app.state._state, "model", None)
+    submit_mock = Mock(side_effect=AssertionError("Replay must not submit"))
+    monkeypatch.setattr(client.app.state.detection_queue, "submit", submit_mock)
+    for source, key, jid in zip(SOURCES, keys, accepted):
+        response = client.post("/detection-submissions/v1", json={"stream_url": source},
+                               headers={"Idempotency-Key": key})
+        assert response.status_code == 200 and response.json()["job_id"] == jid
+        assert response.json()["status"] == "failed" and "restarted" in response.json()["error"]
+        lookup = client.get("/detection-submissions/v1", headers={"Idempotency-Key": key})
+        assert lookup.status_code == 200 and lookup.json()["job_id"] == jid
+        assert lookup.json()["status"] == "failed" and "restarted" in lookup.json()["error"]
+    assert len(restarted.all_jobs()) == 9 and observed["order"] == accepted[:1]
+    submit_mock.assert_not_called()
+    restarted._db.close()
+
+
+def test_keyed_admission_rejections_do_not_reserve_identity(queued_client, monkeypatch):
+    client, store, started, _, _ = queued_client
+    body = {"stream_url": SOURCES[0]}
+    key = submission_key()
+    headers = {"Idempotency-Key": key}
+    model = client.app.state.model
+    monkeypatch.setitem(client.app.state._state, "model", None)
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 503
+    assert not store._submission_receipts
+    monkeypatch.setitem(client.app.state._state, "model", model)
+    monkeypatch.setattr(settings, "max_pending_jobs", 0)
+    submit(client, SOURCES[1])
+    assert started.wait(2)
+    response = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert response.status_code == 503 and response.headers["retry-after"] == "10"
+    assert not store._submission_receipts
+    monkeypatch.setattr(settings, "max_pending_jobs", 9)
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 202
+
+
+def test_browser_cors_keyed_request_preserves_auth_and_allowlist(queued_client, monkeypatch):
+    client, store, _, _, _ = queued_client
+    origin = "https://michaelabatetsu.github.io"
+    response = client.options("/detection-submissions/v1", headers={
+        "Origin": origin, "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type,idempotency-key",
+    })
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
+    assert client.options("/detection-submissions/v1", headers={
+        "Origin": origin, "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization,idempotency-key",
+    }).status_code == 200
+    assert client.options("/detection-submissions/v1", headers={
+        "Origin": "https://attacker.example", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "idempotency-key",
+    }).status_code == 400
+    headers = {"Origin": origin, "Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 202
+    client.headers.pop("Authorization")
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 401
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    monkeypatch.setattr(settings, "approved_stream_urls", [])
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 403
+    assert len(store.all_jobs()) == 1
+
+
+def test_keyless_response_shape_and_independent_jobs_are_unchanged(queued_client):
+    client, store, _, _, _ = queued_client
+    responses = [client.post("/detect-accident", json={"stream_url": SOURCES[0]}) for _ in range(2)]
+    for response in responses:
+        assert response.status_code == 202
+        assert set(response.json()) == {"job_id", "status", "message", "frames", "artifacts_base_url"}
+        assert response.json()["status"] == "pending"
+    assert len(store.all_jobs()) == 2
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("", 422), ("opaque-old-client-key", 422), ("x" * 51, 422),
+    (f"v1.{int(time.time()) - 86401}.{uuid.uuid4()}", 410),
+    (f"v1.{int(time.time()) + 3600}.{uuid.uuid4()}", 422),
+])
+def test_invalid_or_expired_http_identity_never_schedules(queued_client, key, expected):
+    client, store, _, _, observed = queued_client
+    response = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]},
+                           headers={"Idempotency-Key": key})
+    assert response.status_code == expected
+    assert not store.all_jobs() and not observed["order"]
+
+
+def test_duplicate_identity_headers_are_rejected(queued_client):
+    client, store, _, _, _ = queued_client
+    key = submission_key()
+    response = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]}, headers=[
+        ("Idempotency-Key", key), ("Idempotency-Key", key),
+    ])
+    assert response.status_code == 422 and not store.all_jobs()
+
+
+def test_receipt_capacity_rejection_is_http_visible_and_does_not_evict(queued_client, monkeypatch):
+    client, store, _, _, _ = queued_client
+    monkeypatch.setattr(settings, "max_submission_receipts", 1)
+    first_key, next_key = submission_key(), submission_key()
+    body = {"stream_url": SOURCES[0]}
+    assert client.post("/detection-submissions/v1", json=body,
+                       headers={"Idempotency-Key": first_key}).status_code == 202
+    full = client.post("/detection-submissions/v1", json=body, headers={"Idempotency-Key": next_key})
+    assert full.status_code == 503 and full.headers["retry-after"] == "10"
+    assert "receipt store" in full.json()["detail"]
+    replay = client.post("/detection-submissions/v1", json=body | {"max_frames": 5, "save_frames": False},
+                         headers={"Idempotency-Key": first_key})
+    assert replay.status_code == 200 and len(store.all_jobs()) == len(store._submission_receipts) == 1
+
+
+def test_durable_storage_required_is_http_visible_but_keyless_remains_available(queued_client, monkeypatch):
+    import app.api.detect as detect_module
+    client, _, _, _, _ = queued_client
+    memory = JobStore(start_reaper=False)
+    monkeypatch.setattr(detect_module, "job_store", memory)
+    response = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]},
+                           headers={"Idempotency-Key": submission_key()})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "idempotency_unavailable"
+    assert not memory.all_jobs()
+
+
+def test_removed_result_http_response_cannot_enqueue(queued_client):
+    client, store, started, release, observed = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    jid = client.post("/detection-submissions/v1", json=body, headers=headers).json()["job_id"]
+    assert started.wait(2)
+    release.set()
+    wait_for(lambda: store.get(jid).status == "complete")
+    with store._lock:
+        store._delete_job(jid)
+    replay = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert replay.status_code == 410
+    assert replay.json()["detail"]["code"] == "idempotency_result_expired"
+    assert observed["order"] == [jid] and not store.all_jobs()
+
+
+def test_versioned_post_requires_key_and_legacy_route_refuses_key(queued_client):
+    client, store, _, _, _ = queued_client
+    body = {"stream_url": SOURCES[0]}
+    assert client.post("/detection-submissions/v1", json=body).status_code == 422
+    response = client.post("/detect-accident", json=body,
+                           headers={"Idempotency-Key": submission_key()})
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "idempotency_requires_versioned_endpoint"
+    assert not store.all_jobs()
+
+
+def test_lost_first_response_on_legacy_or_downgraded_server_cannot_duplicate(queued_client):
+    from fastapi import FastAPI
+    client, store, started, _, observed = queued_client
+    legacy = FastAPI()
+    legacy_scheduled = []
+
+    @legacy.post("/detect-accident", status_code=202)
+    def legacy_submit(body: dict):
+        # Older servers silently ignore an unknown Idempotency-Key header.
+        legacy_scheduled.append(body)
+        return {"job_id": str(uuid.uuid4()), "status": "pending"}
+
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    with TestClient(legacy) as old_server:
+        # A lost first response from a genuinely old server is still safe:
+        # the endpoint does not exist, so neither attempt can submit inference.
+        old_server.post("/detection-submissions/v1", json=body, headers=headers)
+        assert old_server.post("/detection-submissions/v1", json=body, headers=headers).status_code == 404
+        assert not legacy_scheduled
+        # The first response can also be lost just before a downgrade.
+        original = client.post("/detection-submissions/v1", json=body, headers=headers)
+        assert original.status_code == 202 and started.wait(2)
+        assert old_server.post("/detection-submissions/v1", json=body, headers=headers).status_code == 404
+        assert old_server.get("/detection-submissions/v1", headers=headers).status_code == 404
+    assert len(store.all_jobs()) == len(observed["order"]) == 1 and not legacy_scheduled
+
+
+def test_key_only_lookup_is_read_only_private_and_not_an_admission_fence(queued_client, monkeypatch):
+    client, store, started, _, observed = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    unknown = client.get("/detection-submissions/v1", headers=headers)
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"]["code"] == "idempotency_key_unknown"
+    assert "delayed POST" in unknown.json()["detail"]["message"]
+    assert not store.all_jobs() and not store._submission_receipts
+    # A previously in-flight POST may arrive after an unknown lookup.
+    original = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]}, headers=headers)
+    assert original.status_code == 202 and started.wait(2)
+    monkeypatch.setitem(client.app.state._state, "model", None)
+    lookup = client.get("/detection-submissions/v1", headers=headers)
+    assert lookup.status_code == 200 and lookup.json()["replayed"] is True
+    assert lookup.json()["job_id"] == original.json()["job_id"]
+    assert lookup.json()["status"] == "running"
+    assert "stream_url" not in lookup.json() and SOURCES[0] not in lookup.text
+    assert "max_frames" not in lookup.json() and len(observed["order"]) == 1
+    client.headers.pop("Authorization")
+    assert client.get("/detection-submissions/v1", headers=headers).status_code == 401
+
+
+def test_key_only_lookup_reports_expired_or_removed_result_without_work(queued_client):
+    client, store, started, release, observed = queued_client
+    headers = {"Idempotency-Key": submission_key()}
+    response = client.post("/detection-submissions/v1", json={"stream_url": SOURCES[0]}, headers=headers)
+    jid = response.json()["job_id"]
+    assert started.wait(2)
+    release.set()
+    wait_for(lambda: store.get(jid).status == "complete")
+    lookup = client.get("/detection-submissions/v1", headers=headers)
+    assert lookup.json()["status"] == "complete"
+    with store._lock:
+        store._delete_job(jid)
+    gone = client.get("/detection-submissions/v1", headers=headers)
+    assert gone.status_code == 410 and gone.json()["detail"]["code"] == "idempotency_result_expired"
+    expired = client.get("/detection-submissions/v1", headers={
+        "Idempotency-Key": f"v1.{int(time.time()) - 86401}.{uuid.uuid4()}",
+    })
+    assert expired.status_code == 410 and expired.json()["detail"]["code"] == "idempotency_key_expired"
+    assert client.get("/detection-submissions/v1").status_code == 422
+    assert not store.all_jobs() and observed["order"] == [jid]
+
+
+def test_storage_write_failure_is_visible_and_never_schedules(queued_client, monkeypatch):
+    client, store, _, _, observed = queued_client
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    store._db.execute(
+        "CREATE TRIGGER fail_submission BEFORE INSERT ON submission_receipts "
+        "BEGIN SELECT RAISE(ABORT, 'submission storage failed'); END"
+    )
+    store._db.commit()
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    response = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "An internal server error occurred."
+    assert not store.all_jobs() and not store._submission_receipts and not observed["order"]
+    store._db.execute("DROP TRIGGER fail_submission")
+    store._db.commit()
+    assert client.post("/detection-submissions/v1", json=body, headers=headers).status_code == 202
+
+
+def test_closed_queue_keyed_admission_is_terminal_and_never_requeues(queued_client):
+    client, store, _, _, observed = queued_client
+    client.app.state.detection_queue.close()
+    headers = {"Idempotency-Key": submission_key()}
+    body = {"stream_url": SOURCES[0]}
+    failed = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert failed.status_code == 503
+    jid = failed.json()["detail"]["job_id"]
+    replay = client.post("/detection-submissions/v1", json=body, headers=headers)
+    assert replay.status_code == 200 and replay.json()["status"] == "failed"
+    assert replay.json()["job_id"] == jid and not observed["order"]
+    assert len(store.all_jobs()) == 1

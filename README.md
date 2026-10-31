@@ -193,6 +193,7 @@ LOG_LEVEL=INFO
 | `JOB_DATABASE_PATH` | unset | SQLite jobs/operator state; set to a persistent volume in production |
 | `OUTPUT_DIR` | unset | Override the pipeline's artifact directory |
 | `MAX_RETAINED_JOBS` | `100` | Oldest terminal histories/artifacts are removed at this limit |
+| `MAX_SUBMISSION_RECEIPTS` | `10000` | Unexpired keyed-submission receipts; new keyed jobs receive 503 when full (receipts are not evicted early) |
 | `MAX_SAVED_FRAMES_PER_JOB` | `300` | Stops saving images at this count without stopping inference |
 | `MAX_SAVED_FRAME_BYTES` | `2000000` | Oversized image writes fail explicitly |
 | `JOB_TIMEOUT_SECONDS` | `300` | Job deadline, checked between frames |
@@ -201,6 +202,152 @@ LOG_LEVEL=INFO
 ---
 
 ## API Reference
+
+### Safe retries after an uncertain detection submission
+
+Use **`POST /detection-submissions/v1`** with exactly **one required**
+`Idempotency-Key` header when a timeout, disconnect or lost response leaves
+acceptance uncertain. The versioned endpoint is absent on legacy servers, so
+even losing the first response cannot cause a retry to enqueue through the old
+endpoint. **Never fall back to `POST /detect-accident`.** That original endpoint
+retains its keyless response shape and behavior: every successful POST creates a
+separate job. This backend rejects keys on the old endpoint with 422
+`idempotency_requires_versioned_endpoint`; older backends silently ignored such
+headers, so using a header on that path was never a safe compatibility mechanism.
+Keyed requests require a persistent
+`JOB_DATABASE_PATH`; without it they fail closed with 503, not in-memory deduplication.
+Existing bearer authentication and the current exact production source allowlist
+apply to **every** POST, including reconciliation. CORS permits this one additional
+header for the configured origins; it does not grant unauthenticated access.
+
+The v1 identity is `v1.<10-digit Unix seconds>.<canonical lowercase UUIDv4>`.
+Generate it once per intended source request, **before** the first POST:
+
+```javascript
+const key = `v1.${Math.floor(Date.now() / 1000)}.${crypto.randomUUID()}`;
+const body = {stream_url: source, max_frames: 5, save_frames: false};
+// For reload recovery, persist only {key, backendIdentity}; do not store source URLs or tokens.
+// Every retry uses this exact key and the same effective detection parameters.
+const response = await fetch(`${apiBase}/detection-submissions/v1`, {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${operatorToken}`,
+    "Content-Type": "application/json",
+    "Idempotency-Key": key
+  },
+  body: JSON.stringify(body)
+});
+```
+
+Generate a **different UUID for each camera/source** in a batch and for each
+intentional new run. Keep the request in memory for POST retries and retain
+the backend identity with the key; do not reuse recovery state against another
+deployment. A retry sends the same
+normalized `stream_url`, effective `max_frames` (default 5), and effective
+`save_frames` (default false). Explicit defaults and omitted defaults are equivalent;
+changing any effective parameter with a recorded identity is a conflict.
+JSON member order does not matter. Server configuration changes do not alter
+the original job on replay.
+
+| HTTP | Meaning and client action |
+|---|---|
+| **202** | Newly reserved and scheduled job. Original fields `job_id`, `status: "pending"`, `message`, `frames: []`, `artifacts_base_url`, plus `replayed: false` and UTC `idempotency_expires_at`. Save the job ID and poll `GET /jobs/{job_id}`. |
+| **200** | Original submission found; **no new work scheduled**. Same fields, `replayed: true`, current `status` (`pending`, `running`, `complete`, `failed`) and `error` (null or original error). Even a failed job is a replay, not automatic retry of inference. Poll the original ID or show its failure. |
+| **409** | `detail.code = "idempotency_key_conflict"`: recorded identity belongs to different parameters; no new job. Do not change parameters to recover an uncertain submission. |
+| **410** | `idempotency_key_expired` or `idempotency_result_expired`: identity is too old, or original result was removed. **Never** schedules work. Show that reconciliation is unavailable; do not automatically replace the key. A deliberately initiated new run requires a new identity. |
+| **422** | Invalid request/header, missing/duplicate headers, malformed identity, or `idempotency_key_in_future` (more than 60 seconds ahead of the effective server clock). New identities require a reasonably synchronized clock. Correct the input; do not replace a previously sent identity just to bypass an uncertainty. |
+| **503** | No model/queue, job/receipt capacity exhausted, or `idempotency_unavailable` (no durable store). Before reservation these create no receipt; retry **the same identity** with backoff. Capacity rejections include `Retry-After: 10`. |
+| **503** with `inference_admission_failed` | Reservation persisted but queue admission failed. `detail` includes original `job_id` and `idempotency_expires_at`; original job becomes `failed`. Same-key POST reconciles that failed job with 200 and never schedules another. |
+| **401 / 403** | Authentication or current source approval denied; no scheduling or reconciliation data. |
+| **404** on versioned POST | Endpoint unavailable on a legacy/downgraded/misconfigured backend. Do not fall back to the old endpoint, replace the identity or treat this as proof that a previous submission was not accepted. |
+| **500 / network timeout** | Acceptance is uncertain. Keep the original identity and request and retry them; never fall back to a keyless POST or automatically generate a replacement identity. |
+
+Identity-specific errors and keyed queue-admission failure use
+`{"detail": {"code": "...", "message": "..."}}` (plus fields noted above).
+Existing model/queue/capacity errors keep `{"detail": "..."}`; ordinary FastAPI
+validation errors retain their standard list-shaped `detail`.
+An expired identity gets 410 even if it was never submitted or its job still exists.
+If the job ID is known, polling it independently remains possible while its result
+is retained. A 200 replay is not a promise that inference succeeded; inspect `status`.
+
+**Key-only reload recovery.** Authenticated **`GET /detection-submissions/v1`**
+requires the same header but no body or URL. It is read-only and returns the
+same 200 replay state (`job_id`, current `status`, `error`, expiry and artifact
+base), never the camera URL or detection parameters. It remains available when
+the model/queue is unavailable. Like the existing job GET, it requires operator
+authentication, not a new source approval check; each POST still revalidates
+the current allowlist. Keys or results that expired produce the same 410
+codes. Missing/invalid headers produce 422; missing durable storage produces 503.
+For an unexpired unknown identity, GET returns 404
+`detail.code = "idempotency_key_unknown"` and a message explaining that a delayed
+POST may still arrive. **Unknown is not an admission fence or a cancellation.**
+Do not generate a new key, schedule a replacement or conclude that the initial
+POST failed merely from that lookup. Retain uncertainty and poll with backoff;
+resubmit only the **same** identity with the exact original body, recovered from
+in-memory state, a trusted fixed-source configuration, or exact source re-entry.
+Never reconstruct a missing body with defaults or a potentially changed URL.
+An ordinary 404 without this error code may mean the versioned GET itself is
+unavailable (legacy/downgraded backend); it supplies no acceptance evidence.
+This lets the browser persist only key/backend identity rather than sensitive
+source URLs, which may contain signed query parameters.
+
+**Retention and atomicity.** The v1 window is fixed at **24 hours from the
+identity's embedded timestamp**, not first acceptance or job completion.
+Retries do not refresh it; identity timestamps up to 60 seconds ahead are tolerated.
+Results may disappear sooner because of `JOB_TTL_SECONDS` or `MAX_RETAINED_JOBS`.
+Separate compact receipts survive that removal until identity expiry, so early
+result eviction returns 410 instead of creating duplicate work. At
+`MAX_SUBMISSION_RECEIPTS`, new keyed requests fail with 503; unexpired receipts
+are never evicted to admit them. Expired receipts are purged at startup,
+on new keyed admission, and by the existing minute reaper. Even after deletion,
+the time-stamped expired identity is rejected, not reused.
+Receipt cleanup atomically persists a nondecreasing server-time watermark with
+deletion. Subsequent identity validation uses the later of wall time and that
+watermark, including after restart: clock rollback cannot revive a key already
+past the cleanup boundary. Large clock jumps can therefore fail closed early
+and reject identities until wall time catches up; they do not promise 24 hours
+of real elapsed availability. Keep the clock synchronized.
+
+Within the supported **one API process / one JobStore / one durable SQLite
+volume** deployment, a store lock serializes concurrent requests and the job
+and receipt commit in **one SQLite transaction** (`WAL`, `synchronous=FULL`)
+before queue submission. Only the reservation winner schedules inference.
+Restart keeps receipts and marks previously pending/running jobs failed, as
+before; same-key replay identifies that terminal original job. A crash between
+commit and queue submission also yields that original failed job on restart.
+There is no automatic restart/requeue and no claim of exactly-once inference
+completion: work can fail or have partial outputs before a crash.
+
+These guarantees do **not** span multiple processes/replicas, separate backend
+volumes, database loss/replacement, restoring an older backup that omits
+receipts/watermark, or requests routed to different stores.
+The in-memory cache and startup recovery are single-owner; do not run multiple
+API owners against the same SQLite file. Horizontal deployments need shared
+transactional admission and ownership fencing before using this contract.
+Keep the volume persistent; an ephemeral platform
+such as Render Free cannot supply restart durability. Old server versions do
+not implement the header: deploy this backend **before** enabling frontend
+automatic retries. The versioned key-required route, not response-field detection
+on the old route, is the compatibility safety boundary. Also verify keyed
+responses' `replayed` and `idempotency_expires_at` fields; a legacy-shaped
+response does not establish a safe retry guarantee.
+
+**Migration and privacy.** Startup adds `submission_receipts` and `submission_clock` without changing
+existing job/incident rows. Legacy/keyless jobs acquire no retroactive identity;
+they cannot safely be reconciled from a timeout using a newly generated key.
+Old clients need no changes. Downgrading the backend disables this guarantee
+even if the receipt table remains. Do not downgrade while clients rely on it.
+Receipts store SHA-256 identity/request hashes, job ID and expiry, not raw
+keys, bearer tokens or an additional copy of camera URLs. Jobs already retain
+their source URL under the existing policy. Identities expose approximate
+creation time and may correlate requests; never encode credentials, camera
+names, personal information or other secrets in them. The key is **not** an
+authorization credential and is scoped to the deployment's shared operator
+access, not a per-user account. Avoid logging keys/tokens in reverse proxies
+and client telemetry. If persisting recovery state in the browser, store only
+the needed key/backend identity, not the source URL or bearer token, and apply an
+appropriate local privacy/cleanup policy. Prefer key-only lookup for recovery;
+do not persist arbitrary source URLs or signed query parameters in local storage.
 
 ### `POST /detect-accident`
 

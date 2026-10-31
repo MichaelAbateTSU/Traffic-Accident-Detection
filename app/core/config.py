@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     max_saved_frame_bytes: int = Field(default=2_000_000, ge=1000)
     max_frame_dimension: int = Field(default=1280, ge=64, le=3840)
     max_retained_jobs: int = Field(default=100, ge=1, le=10000)
+    max_submission_receipts: int = Field(
+        default=10000, ge=1, le=100000,
+        description="Maximum unexpired idempotency receipts; full storage rejects new keyed jobs.",
+    )
     inference_threads: int = Field(default=2, ge=1, le=16)
     deepsort_embedder_batch_size: int = Field(default=16, ge=1, le=16)
 

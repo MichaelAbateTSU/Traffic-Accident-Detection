@@ -9,18 +9,23 @@ POST /detect-accident
 
 GET /jobs/{job_id}
     Returns DetectionResult (poll until status == "complete" or "failed")
+
+POST /detection-submissions/v1
+    Requires Idempotency-Key; accepts or reconciles one durable submission.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
 from app.core.config import settings
 from app.core.security import validate_stream_url
-from app.models.schemas import DetectRequest, DetectionResult, JobAccepted
+from app.models.schemas import DetectRequest, DetectionResult, JobAccepted, SubmissionAccepted
 from app.services.job_store import JobCapacityError, job_store
+from app.services.submission_identity import SubmissionIdentityError
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,54 @@ def _to_absolute_url(request: Request, value: str | None) -> str | None:
     return f"{_base_origin(request)}/{value}"
 
 
+def _identity_error(exc: SubmissionIdentityError) -> HTTPException:
+    logger.warning("Rejected detection submission identity: %s", exc.code)
+    return HTTPException(status_code=exc.status_code,
+                         detail={"code": exc.code, "message": str(exc)})
+
+
+def _check_single_identity_header(request: Request) -> None:
+    if len(request.headers.getlist("idempotency-key")) != 1:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_idempotency_key", "message": "Supply exactly one Idempotency-Key header.",
+        })
+
+
+def _replay_response(job: DetectionResult, request: Request, expiry: datetime) -> SubmissionAccepted:
+    return SubmissionAccepted(
+        job_id=job.job_id, status=job.status, replayed=True,
+        idempotency_expires_at=expiry, error=job.error,
+        message="Original submission found; no new work scheduled. Poll GET /jobs/{job_id}.",
+        frames=[], artifacts_base_url=_artifacts_base_url(request),
+    )
+
+
+@router.get(
+    "/detection-submissions/v1",
+    response_model=SubmissionAccepted,
+    summary="Find an original submission without sending its source URL",
+    responses={
+        404: {"description": "No receipt found yet; a delayed POST may still arrive."},
+        410: {"description": "Expired identity or removed original result; no work scheduled."},
+        503: {"description": "Persistent submission storage is unavailable."},
+    },
+)
+async def find_submission(
+    request: Request, idempotency_key: str = Header(max_length=50),
+) -> SubmissionAccepted:
+    _check_single_identity_header(request)
+    try:
+        job, expires_at = job_store.find_submission(idempotency_key)
+    except SubmissionIdentityError as exc:
+        raise _identity_error(exc) from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "idempotency_key_unknown",
+            "message": "No original submission found yet. A delayed POST may still arrive; this lookup does not cancel it.",
+        })
+    return _replay_response(job, request, expires_at)
+
+
 # ---------------------------------------------------------------------------
 # POST /detect-accident
 # ---------------------------------------------------------------------------
@@ -59,7 +112,41 @@ def _to_absolute_url(request: Request, value: str | None) -> str | None:
     summary="Start an accident detection job",
     response_description="Job accepted. Poll GET /jobs/{job_id} for results.",
 )
-async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
+async def detect_accident(body: DetectRequest, request: Request, response: Response) -> JobAccepted | SubmissionAccepted:
+    if "idempotency-key" in request.headers:
+        raise HTTPException(status_code=422, detail={
+            "code": "idempotency_requires_versioned_endpoint",
+            "message": "Use POST /detection-submissions/v1 for keyed submissions.",
+        })
+    return await _submit_detection(body, request, response, None)
+
+
+@router.post(
+    "/detection-submissions/v1",
+    response_model=SubmissionAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Safely submit or reconcile a detection job",
+    response_description="New submission accepted, or original submission reconciled without new inference.",
+    responses={
+        200: {"model": SubmissionAccepted, "description": "Original job found; no new work scheduled."},
+        409: {"description": "Identity already used with different detection parameters."},
+        410: {"description": "Expired identity or removed original job; no work scheduled."},
+        503: {"description": "Model, queue, job capacity, receipt capacity or durable store unavailable."},
+    },
+)
+async def submit_detection(
+    body: DetectRequest, request: Request, response: Response,
+    idempotency_key: str = Header(
+        max_length=50,
+        description="Required v1.<Unix seconds>.<lowercase UUIDv4>; identical retries reuse the original job for 24 hours.",
+    ),
+) -> JobAccepted | SubmissionAccepted:
+    return await _submit_detection(body, request, response, idempotency_key)
+
+
+async def _submit_detection(
+    body: DetectRequest, request: Request, response: Response, idempotency_key: str | None,
+) -> JobAccepted | SubmissionAccepted:
     """
     Queue an accident detection job against the given stream URL.
 
@@ -67,10 +154,26 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
     (accessed via `request.app.state.model`).  Each job gets its own
     DeepSORT tracker and AccidentScorer instance.
 
-    Returns immediately with a `job_id`; processing happens in a background
-    thread so the event loop is never blocked.
+    Optional versioned identities reserve one durable job for identical retries.
+    A replay returns the original job state without queue submission.
     """
-    # Guard: YOLO model must be loaded (set in lifespan).
+    stream_url = str(body.stream_url)
+    validate_stream_url(stream_url)
+    expires_at = None
+
+    if idempotency_key is not None:
+        _check_single_identity_header(request)
+        try:
+            existing, expires_at = job_store.lookup_submission(
+                idempotency_key, stream_url, body.max_frames, body.save_frames,
+            )
+        except SubmissionIdentityError as exc:
+            raise _identity_error(exc) from exc
+        if existing is not None:
+            response.status_code = 200
+            return _replay_response(existing, request, expires_at)
+
+    # Existing receipts can be reconciled even when inference is unavailable.
     model = getattr(request.app.state, "model", None)
     if model is None:
         raise HTTPException(
@@ -78,17 +181,26 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
             detail="YOLO model is not yet loaded. Please try again in a moment.",
         )
 
-    stream_url = str(body.stream_url)
-    validate_stream_url(stream_url)
     queue = getattr(request.app.state, "detection_queue", None)
     if queue is None:
         raise HTTPException(status_code=503, detail="The inference queue is unavailable.")
     max_frames = body.max_frames
     try:
-        job = job_store.create(
-            stream_url, max_frames=max_frames, save_frames=body.save_frames,
-            capacity=settings.get_job_admission_capacity(),
-        )
+        if idempotency_key is None:
+            job = job_store.create(
+                stream_url, max_frames=max_frames, save_frames=body.save_frames,
+                capacity=settings.get_job_admission_capacity(),
+            )
+        else:
+            job, replayed, expires_at = job_store.create_submission(
+                idempotency_key, stream_url, max_frames=max_frames, save_frames=body.save_frames,
+                capacity=settings.get_job_admission_capacity(),
+            )
+            if replayed:
+                response.status_code = 200
+                return _replay_response(job, request, expires_at)
+    except SubmissionIdentityError as exc:
+        raise _identity_error(exc) from exc
     except JobCapacityError as exc:
         raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
 
@@ -107,14 +219,26 @@ async def detect_accident(body: DetectRequest, request: Request) -> JobAccepted:
             body.save_frames,
         )
     except RuntimeError:
-        from datetime import datetime, timezone
         logger.exception("Could not schedule detection job %s", job.job_id)
         job_store.update(
             job.job_id, status="failed", completed_at=datetime.now(timezone.utc),
             error="The inference worker is unavailable.",
         )
-        raise HTTPException(status_code=503, detail="The inference worker is unavailable.")
+        detail = "The inference worker is unavailable."
+        if idempotency_key is not None:
+            assert expires_at is not None
+            raise HTTPException(status_code=503, detail={
+                "code": "inference_admission_failed", "message": detail,
+                "job_id": job.job_id, "idempotency_expires_at": expires_at.isoformat(),
+            })
+        raise HTTPException(status_code=503, detail=detail)
 
+    if idempotency_key is not None:
+        assert expires_at is not None
+        return SubmissionAccepted(
+            job_id=job.job_id, replayed=False, idempotency_expires_at=expires_at,
+            frames=[], artifacts_base_url=_artifacts_base_url(request),
+        )
     return JobAccepted(
         job_id=job.job_id,
         frames=[],

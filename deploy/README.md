@@ -5,6 +5,13 @@ single-worker CPU API runs on an **internal-only network**, and a bounded
 HTTPS CONNECT proxy is its only route to approved public cameras. Jobs,
 incident status changes and images use a persistent named volume.
 
+Optional detection submission identities also use that volume. Deploy the backend
+before enabling frontend same-key retries; keep one API owner per SQLite volume
+and never route retries across independent replicas. See the
+[safe submission retry contract](../README.md#safe-retries-after-an-uncertain-detection-submission)
+for 24-hour identities, receipt limits, early result eviction, restart behavior,
+error semantics and privacy requirements. Keyless clients are unchanged.
+
 **Deployment status:** no Oracle account/VM authorization, SSH target or backend
 DNS name is configured in this workspace. No cloud resources have been created,
 and no public backend URL is live. The local container verification does not

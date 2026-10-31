@@ -23,6 +23,9 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.models.schemas import DetectionResult
+from app.services.submission_identity import (
+    SubmissionIdentityError, identify_submission, request_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +141,8 @@ class JobStore:
     ) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, DetectionResult] = {}
+        self._submission_receipts: dict[str, tuple[str, str, datetime]] = {}
+        self._submission_clock = datetime.min.replace(tzinfo=timezone.utc)
         # Operator overrides keyed by incident_id ("<job_id>:<frame_idx>").
         self._incident_overrides: dict[str, dict] = {}
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.job_ttl_seconds
@@ -149,6 +154,24 @@ class JobStore:
             self._db.execute("PRAGMA synchronous=FULL")
             self._db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS overrides (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS submission_receipts "
+                "(identity TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, "
+                "job_id TEXT NOT NULL, expires_at TEXT NOT NULL)"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS submission_clock "
+                "(id INTEGER PRIMARY KEY CHECK (id = 1), observed_at TEXT NOT NULL)"
+            )
+            clock_row = self._db.execute("SELECT observed_at FROM submission_clock WHERE id = 1").fetchone()
+            if clock_row is not None:
+                self._submission_clock = datetime.fromisoformat(clock_row[0])
+            for identity, fingerprint, jid, expires_at in self._db.execute(
+                "SELECT identity, fingerprint, job_id, expires_at FROM submission_receipts"
+            ):
+                self._submission_receipts[identity] = (
+                    fingerprint, jid, datetime.fromisoformat(expires_at),
+                )
             for jid, payload in self._db.execute("SELECT id, payload FROM jobs"):
                 self._jobs[jid] = DetectionResult.model_validate_json(payload)
             for iid, payload in self._db.execute("SELECT id, payload FROM overrides"):
@@ -212,18 +235,110 @@ class JobStore:
             created_at=_utcnow(),
         )
         with self._lock:
-            active = sum(j.status in ("pending", "running") for j in self._jobs.values())
-            if capacity is not None and active >= capacity:
-                raise JobCapacityError("The running/pending job capacity is exhausted. Please retry later.")
-            while len(self._jobs) >= settings.max_retained_jobs:
-                terminal = [j for j in self._jobs.values() if j.status in ("complete", "failed")]
-                if not terminal:
-                    raise JobCapacityError("The job store is at capacity. Please retry later.")
-                self._delete_job(min(terminal, key=lambda j: j.completed_at or j.created_at).job_id)
+            self._make_room_locked(capacity)
             self._persist_job(job)
             self._jobs[job.job_id] = job
         logger.debug("Job created  job_id=%s", job.job_id)
         return job
+
+    def _make_room_locked(self, capacity: int | None) -> None:
+        active = sum(j.status in ("pending", "running") for j in self._jobs.values())
+        if capacity is not None and active >= capacity:
+            raise JobCapacityError("The running/pending job capacity is exhausted. Please retry later.")
+        while len(self._jobs) >= settings.max_retained_jobs:
+            terminal = [j for j in self._jobs.values() if j.status in ("complete", "failed")]
+            if not terminal:
+                raise JobCapacityError("The job store is at capacity. Please retry later.")
+            self._delete_job(min(terminal, key=lambda j: j.completed_at or j.created_at).job_id)
+
+    def _lookup_submission_locked(
+        self, identity: str, fingerprint: str | None,
+    ) -> DetectionResult | None:
+        receipt = self._submission_receipts.get(identity)
+        if receipt is None:
+            return None
+        previous_fingerprint, jid, _ = receipt
+        if fingerprint is not None and previous_fingerprint != fingerprint:
+            raise SubmissionIdentityError(409, "idempotency_key_conflict",
+                                          "This identity was used with different detection parameters.")
+        job = self._jobs.get(jid)
+        if job is None:
+            raise SubmissionIdentityError(410, "idempotency_result_expired",
+                                          "The original job result was removed; this identity cannot schedule work.")
+        return job
+
+    def find_submission(self, key: str) -> tuple[DetectionResult | None, datetime]:
+        """Read-only identity reconciliation; absence is not an admission fence."""
+        with self._lock:
+            self._require_submission_storage()
+            identity, expires_at = identify_submission(key, max(_utcnow(), self._submission_clock))
+            return self._lookup_submission_locked(identity, None), expires_at
+
+    def lookup_submission(
+        self, key: str, stream_url: str, max_frames: int, save_frames: bool,
+    ) -> tuple[DetectionResult | None, datetime]:
+        with self._lock:
+            self._require_submission_storage()
+            identity, expires_at = identify_submission(key, max(_utcnow(), self._submission_clock))
+            fingerprint = request_fingerprint(stream_url, max_frames, save_frames)
+            return self._lookup_submission_locked(identity, fingerprint), expires_at
+
+    def create_submission(
+        self, key: str, stream_url: str, *, max_frames: int, save_frames: bool,
+        capacity: int,
+    ) -> tuple[DetectionResult, bool, datetime]:
+        """Reserve the identity and job atomically; only the winner may enqueue."""
+        with self._lock:
+            self._require_submission_storage()
+            now = _utcnow()
+            identity, expires_at = identify_submission(key, max(now, self._submission_clock))
+            fingerprint = request_fingerprint(stream_url, max_frames, save_frames)
+            existing = self._lookup_submission_locked(identity, fingerprint)
+            if existing is not None:
+                return existing, True, expires_at
+            self._reap_receipts_locked(now)
+            if len(self._submission_receipts) >= settings.max_submission_receipts:
+                raise JobCapacityError("The submission receipt store is full. Please retry later.")
+            self._make_room_locked(capacity)
+            job = DetectionResult(
+                job_id=_new_job_id(), status="pending", stream_url=stream_url,
+                max_frames=max_frames, save_frames=save_frames, created_at=now,
+            )
+            if self._db is not None:
+                # Do not use _persist_job here: its commit would split this reservation.
+                with self._db:
+                    self._db.execute("INSERT INTO jobs VALUES (?, ?)", (job.job_id, job.model_dump_json()))
+                    self._db.execute(
+                        "INSERT INTO submission_receipts VALUES (?, ?, ?, ?)",
+                        (identity, fingerprint, job.job_id, expires_at.isoformat()),
+                    )
+            self._jobs[job.job_id] = job
+            self._submission_receipts[identity] = (fingerprint, job.job_id, expires_at)
+            return job, False, expires_at
+
+    def _require_submission_storage(self) -> None:
+        if self._db is None:
+            raise SubmissionIdentityError(
+                503, "idempotency_unavailable",
+                "Keyed submissions require a persistent JOB_DATABASE_PATH.",
+            )
+
+    def _reap_receipts_locked(self, now: datetime) -> None:
+        now = max(now, self._submission_clock)
+        expired = [identity for identity, (_, _, expiry) in self._submission_receipts.items()
+                   if now >= expiry]
+        if self._db is not None and (expired or now > self._submission_clock):
+            with self._db:
+                # The clock fence and deletion must commit together: old keys cannot
+                # become valid again after GC even if wall time goes backwards.
+                self._db.execute(
+                    "INSERT OR REPLACE INTO submission_clock VALUES (1, ?)", (now.isoformat(),),
+                )
+                self._db.executemany("DELETE FROM submission_receipts WHERE identity = ?",
+                                     [(identity,) for identity in expired])
+        self._submission_clock = now
+        for identity in expired:
+            del self._submission_receipts[identity]
 
     def get(self, job_id: str) -> DetectionResult | None:
         with self._lock:
@@ -500,6 +615,7 @@ class JobStore:
     def _reap_expired(self) -> None:
         now = _utcnow().timestamp()
         with self._lock:
+            self._reap_receipts_locked(datetime.fromtimestamp(now, tz=timezone.utc))
             expired = [
                 jid
                 for jid, job in self._jobs.items()

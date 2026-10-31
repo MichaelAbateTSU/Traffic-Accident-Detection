@@ -175,6 +175,19 @@ class JobAccepted(BaseModel):
     )
 
 
+class SubmissionAccepted(BaseModel):
+    """Keyed acceptance or reconciliation; a replay never schedules inference."""
+
+    job_id: str
+    status: Literal["pending", "running", "complete", "failed"] = "pending"
+    message: str = "Detection job queued. Poll GET /jobs/{job_id} for results."
+    frames: list[FrameImages] = Field(default_factory=list)
+    artifacts_base_url: str | None = None
+    replayed: bool
+    idempotency_expires_at: datetime
+    error: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Shared API metadata / error models (new endpoints only)
 # ---------------------------------------------------------------------------
