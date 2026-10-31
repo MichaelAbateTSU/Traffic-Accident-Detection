@@ -300,7 +300,7 @@ class AccidentScorer:
             if elapsed <= 0:
                 raise ValueError("Track frame indices must increase monotonically")
             if recent[0].decel_speed is None or recent[-1].decel_speed is None:
-                continue
+                raise ValueError("Track snapshot is missing the required scalar braking speed")
             mean_accel = (recent[-1].decel_speed - recent[0].decel_speed) / elapsed
             if mean_accel < threshold:
                 # Normalise: threshold → 0.5, 3× threshold → 1.0

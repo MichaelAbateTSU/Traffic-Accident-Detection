@@ -54,6 +54,16 @@ def test_recent_window_and_insufficient_history():
     assert scorer._signal_abrupt_decel() == 0
 
 
+@pytest.mark.parametrize("missing_index", [0, 1])
+def test_missing_scalar_braking_speed_fails_explicitly(missing_index):
+    scorer = AccidentScorer()
+    history = snapshots([(30, 0), (20, 0)])
+    history[missing_index].decel_speed = None
+    scorer._records[1].history.extend(history)
+    with pytest.raises(ValueError, match="required scalar braking speed"):
+        scorer._signal_abrupt_decel()
+
+
 def test_genuine_braking_while_turning_uses_speed_not_heading():
     scorer = AccidentScorer()
     scorer._records[1].history.extend(snapshots([(30, 0), (0, 24), (-18, 0), (0, -12)]))

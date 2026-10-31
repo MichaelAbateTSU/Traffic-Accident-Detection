@@ -1061,7 +1061,8 @@ squared), not the sign of image-coordinate acceleration components. Mirroring
 motion left/right or up/down therefore preserves the signal, and a constant-speed
 turn alone does not count as braking. This separate scalar estimate prevents
 heading changes from cancelling vector components; the existing vector EMA
-speed used by other signals is unchanged. Velocity and acceleration ingestion also
+formulation used by other signals is retained. Its values can change when
+observations have frame gaps: velocity and acceleration ingestion now
 use elapsed frames when a track observation is missing. This intentionally
 corrects the former direction-dependent heuristic across the API, CLI and
 offline evaluator, which share `AccidentScorer`. Thresholds, weights, EMA and
