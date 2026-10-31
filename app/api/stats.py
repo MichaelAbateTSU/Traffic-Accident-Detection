@@ -20,6 +20,7 @@ router = APIRouter(prefix="/stats", tags=["stats"])
     response_model=StatsOverviewResponse,
     summary="Get dashboard overview stats",
     response_description="Dashboard-friendly aggregate counters and service status.",
+    description="Counts retained alarm-active frame records, not distinct accidents. uptime_percent is a nonfailed-job fraction, not service uptime.",
 )
 async def get_stats_overview(
     request: Request,
@@ -27,7 +28,7 @@ async def get_stats_overview(
         default=30,
         ge=1,
         le=365,
-        description="Lookback window used to estimate uptime percentage.",
+        description="Admission-time lookback for the retained nonfailed-job fraction, not measured uptime.",
     ),
 ) -> StatsOverviewResponse:
     started = start_timer()
@@ -44,7 +45,7 @@ async def get_stats_overview(
         end_time=now,
     )
 
-    # Approximate uptime as non-failed job ratio in a configurable lookback.
+    # Compatibility metric: nonfailed-job fraction, not measured service uptime.
     jobs_in_window, total_in_window = job_store.list_jobs_paginated(
         start_time=lookback_start,
         end_time=now,

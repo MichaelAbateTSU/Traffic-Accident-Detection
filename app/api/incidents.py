@@ -180,6 +180,7 @@ async def export_incidents(
     "",
     response_model=IncidentListResponse,
     summary="List incidents with filtering and pagination",
+    description="Each incident is one retained alarm-active processed frame, including consecutive frames; IDs are job_id:frame_idx. No verified-accident or episode grouping is performed.",
 )
 async def list_incidents(
     page: int = Query(default=1, ge=1),
