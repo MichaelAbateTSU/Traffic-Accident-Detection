@@ -196,7 +196,7 @@ LOG_LEVEL=INFO
 | `MAX_SAVED_FRAMES_PER_JOB` | `300` | Stops saving images at this count without stopping inference |
 | `MAX_SAVED_FRAME_BYTES` | `2000000` | Oversized image writes fail explicitly |
 | `JOB_TIMEOUT_SECONDS` | `300` | Job deadline, checked between frames |
-| `EXPERIMENTAL_SCORER_SOURCE_FPS` | unset (legacy mode) | Explicit trusted constant FPS for **every** admitted source; enables experimental scoring, never inferred from capture FPS |
+| `EXPERIMENTAL_SCORER_SOURCE_FPS` | unset/blank (legacy mode) | Explicit trusted constant FPS for **every** admitted source; enables experimental scoring, never inferred from capture FPS |
 
 ---
 
@@ -1134,6 +1134,8 @@ EXPERIMENTAL_SCORER_SOURCE_FPS=25 uvicorn app.main:app --workers 1
 ```
 
 The API setting is a deployment-wide assertion, not a per-camera rate lookup.
+Docker Compose forwards the optional setting from `deploy/.env`; blank disables
+it, and the example deliberately leaves it blank.
 Leave it unset for mixed-rate/unknown-rate sources; this mode must not be
 enabled on a heterogeneous camera deployment. Snapshot CLI accepts the same
 flag but assumes **consecutive source frames**, regardless of sleeps between
@@ -1212,6 +1214,10 @@ absent tracks as observed gap-free evidence. Production's contiguous decoded cou
 cannot identify unreported decoder drops. No interpolation can recover a
 collision between samples. These constraints prevent enabling the experiment
 automatically or presenting it as a production-calibrated probability.
+Production/CLI/evaluator regressions explicitly simulate zero YOLO detections
+with confirmed predicted-only tracks: legacy continues scoring them, while the
+experimental mode excludes them and restarts history on genuine reappearance.
+This demonstrates the policy, not the cause of any particular missed alarm.
 Production logs the selected rate, CLI announces it, and experimental
 evaluator/snapshot metadata explicitly records the mode; legacy output shapes
 stay unchanged.

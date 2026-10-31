@@ -599,7 +599,9 @@ def test_explicit_service_rate_is_not_replaced_by_unreliable_nominal_capture(
     _, fake_tracker = fake_components
     monkeypatch.setattr(settings, "environment", "production")
     monkeypatch.setattr(settings, "experimental_scorer_source_fps", 25)
-    monkeypatch.setattr(detection_service, "DeepSortTracker", lambda: fake_tracker)
+    monkeypatch.setattr(settings, "deepsort_embedder_batch_size", 4)
+    tracker_factory = Mock(return_value=fake_tracker)
+    monkeypatch.setattr(detection_service, "DeepSortTracker", tracker_factory)
     monkeypatch.setattr(detection_service, "_run_yolo",
                         lambda model, frame: tracks_at(steady(int(frame[0, 0, 0]) / 25)))
     cap = Mock()
@@ -613,6 +615,7 @@ def test_explicit_service_rate_is_not_replaced_by_unreliable_nominal_capture(
     result = store.get(job.job_id)
     assert result.status == "complete"
     assert result.peak_confidence == 0
+    tracker_factory.assert_called_once_with(embedder_batch_size=4)
 
 
 @pytest.mark.parametrize("experimental", [False, True])
@@ -663,3 +666,97 @@ def test_cli_flag_requires_a_supplied_rate(fake_components):
     assert args.experimental_scorer_source_fps == 25
     with pytest.raises(SystemExit):
         pipeline._build_parser().parse_args(["--experimental-scorer-source-fps"])
+
+
+def test_service_environment_and_compose_keep_timing_opt_in(monkeypatch):
+    from pathlib import Path
+    from app.core.config import Settings
+
+    monkeypatch.setenv("EXPERIMENTAL_SCORER_SOURCE_FPS", "")
+    assert Settings(_env_file=None).experimental_scorer_source_fps is None
+    monkeypatch.setenv("EXPERIMENTAL_SCORER_SOURCE_FPS", "25")
+    assert Settings(_env_file=None).experimental_scorer_source_fps == 25
+    monkeypatch.setenv("EXPERIMENTAL_SCORER_SOURCE_FPS", "nan")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+    root = Path(__file__).resolve().parents[1]
+    assert "EXPERIMENTAL_SCORER_SOURCE_FPS: ${EXPERIMENTAL_SCORER_SOURCE_FPS:-}" in (
+        root / "deploy" / "compose.yaml"
+    ).read_text()
+    assert "EXPERIMENTAL_SCORER_SOURCE_FPS=\n" in (root / "deploy" / ".env.example").read_text()
+
+
+@pytest.mark.parametrize("entry", ["production", "cli", "evaluation"])
+@pytest.mark.parametrize("experimental", [False, True])
+def test_zero_detections_with_confirmed_predicted_tracks_is_handled_at_real_entry_points(
+    entry, experimental, fake_components, monkeypatch, tmp_path,
+):
+    import accident_scorer
+    import evaluate_accidents as evaluation
+    from app.core.config import settings
+    from app.services import detection_service, video_source
+    from app.services.job_store import JobStore
+
+    pipeline, fake_tracker = fake_components
+    results = []
+    scorers = []
+    def recording_scorer(**kwargs):
+        scorer = AccidentScorer(**kwargs)
+        original_update = scorer.update
+        def update(tracks, idx):
+            result = original_update(tracks, idx)
+            results.append(result)
+            return result
+        scorer.update = update
+        scorers.append(scorer)
+        return scorer
+    for module in (accident_scorer, pipeline, detection_service):
+        monkeypatch.setattr(module, "AccidentScorer", recording_scorer)
+
+    detections_at_gap = []
+    def detector(model, frame):
+        idx = int(frame[0, 0, 0])
+        return [] if idx == 26 else ["synthetic vehicle detection"]
+    def tracked(detections, frame):
+        idx = int(frame[0, 0, 0])
+        tracks = tracks_at([(1000 if idx == 27 else 0, 0)])
+        tracks[0].time_since_update = 1 if idx == 26 else 0
+        if idx == 26:
+            detections_at_gap.append(detections)
+        return tracks
+    fake_tracker.update.side_effect = tracked
+    monkeypatch.setattr(pipeline, "_run_yolo", detector)
+    monkeypatch.setattr(detection_service, "_run_yolo", detector)
+    monkeypatch.setattr(detection_service, "DeepSortTracker", lambda: fake_tracker)
+    frames = frames_for(28)
+    cap = Mock()
+    cap.get.return_value = 25
+    cap.read.side_effect = [(True, frame) for frame in frames] + [(False, None)]
+    monkeypatch.setattr(pipeline, "_open_video", lambda _: cap)
+    monkeypatch.setattr(video_source, "open_production_video", lambda _: cap)
+
+    if entry == "production":
+        monkeypatch.setattr(settings, "environment", "production")
+        monkeypatch.setattr(settings, "experimental_scorer_source_fps", 25 if experimental else None)
+        store = JobStore(start_reaper=False)
+        monkeypatch.setattr(detection_service, "job_store", store)
+        job = store.create("https://example.com/video")
+        detection_service.run_detection_job(job.job_id, job.stream_url, 28, object())
+        assert store.get(job.job_id).status == "complete"
+    elif entry == "cli":
+        pipeline.run_pipeline("synthetic.mp4", display=False,
+                              experimental_scorer_source_fps=25 if experimental else None)
+    else:
+        clip = evaluation.Clip(clip_id="predicted", group_id="predicted", split="test",
+                               source=str(tmp_path), fps=25, labels=[None] * 28, clip_label=1)
+        monkeypatch.setattr(evaluation, "iter_clip_frames", lambda _: (f for f in frames))
+        evaluation.evaluate_clip(clip, object(), tmp_path, experimental_constant_fps=experimental)
+    assert detections_at_gap == [[]]
+    assert len(results) == 28
+    gap_signals = results[26][2]["signal_values"]
+    assert gap_signals["sudden_stop"] == (0 if experimental else 0.5)
+    if experimental:
+        assert all(value == 0 for value in gap_signals.values())
+        assert len(scorers[0]._records[1].history) == 1
+    else:
+        assert len(scorers[0]._records[1].history) == 28

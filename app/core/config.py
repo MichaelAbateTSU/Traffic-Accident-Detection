@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     @field_validator("experimental_scorer_source_fps", mode="before")
     @classmethod
     def validate_scorer_fps(cls, value):
+        if value == "":
+            return None
         if isinstance(value, bool):
             raise ValueError("Experimental scorer FPS cannot be a boolean")
         return value
