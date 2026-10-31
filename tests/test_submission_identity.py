@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -547,3 +548,40 @@ def test_full_retention_failed_admission_preserves_original_history(store, monke
         restarted.find_submission(key)
     assert error.value.code == "idempotency_result_expired"
     restarted._db.close()
+
+
+def test_reaper_continues_after_artifact_stat_failure_and_cleans_next_job(store, monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(settings, "output_dir", str(tmp_path / "artifacts"))
+    first = store.create(SOURCE)
+    second = store.create(SOURCE)
+    for job in (first, second):
+        store.update(job.job_id, status="complete",
+                     completed_at=datetime.now(timezone.utc) - timedelta(days=2))
+        folder = tmp_path / "artifacts" / job.job_id
+        folder.mkdir(parents=True)
+        (folder / "frame.jpg").write_bytes(b"original")
+    exists = Path.exists
+    first_folder = tmp_path / "artifacts" / first.job_id
+    def stat_failure(path):
+        if path == first_folder:
+            raise PermissionError("Artifact stat denied")
+        return exists(path)
+    monkeypatch.setattr(Path, "exists", stat_failure)
+    waits = []
+    class StopLoop(Exception):
+        pass
+    def scheduled_wait(seconds):
+        waits.append(seconds)
+        assert seconds == 60
+        if len(waits) == 2:
+            assert not store.all_jobs()
+            assert (first_folder / "frame.jpg").read_bytes() == b"original"
+            assert not exists(tmp_path / "artifacts" / second.job_id)
+        elif len(waits) == 3:
+            raise StopLoop()
+    monkeypatch.setattr("app.services.job_store.time.sleep", scheduled_wait)
+    with pytest.raises(StopLoop):
+        store._reap_loop()
+    assert waits == [60, 60, 60]
+    assert any("Could not remove expired job artifacts" in record.message and record.exc_info
+               for record in caplog.records)

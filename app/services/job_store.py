@@ -221,11 +221,11 @@ class JobStore:
         uuid.UUID(jid)
         import config as pipeline_config
         folder = Path(settings.output_dir or pipeline_config.OUTPUT_DIR) / jid
-        if folder.exists():
-            try:
+        try:
+            if folder.exists():
                 shutil.rmtree(folder)
-            except OSError:
-                logger.exception("Could not remove expired job artifacts %s", jid)
+        except OSError:
+            logger.exception("Could not remove expired job artifacts %s", jid)
 
     # ------------------------------------------------------------------
     # Public methods

@@ -312,7 +312,9 @@ in the same SQLite transaction as the replacement job and optional receipt.
 A failed replacement insert leaves the previous history, overrides and artifacts
 intact. Successful admissions preserve the oldest-terminal eviction policy;
 in-memory removal and artifact deletion occur only after commit. Artifact
-cleanup failures are logged. A crash after commit but before cleanup may leave
+cleanup failures, including filesystem stat errors, are logged without aborting
+new-job scheduling or subsequent reaper cycles; no failed deletion is reported
+as successful. A crash after commit but before cleanup may leave
 orphan artifact directories; SQLite atomicity does not make filesystem deletion
 transactional or promise crash-proof artifact cleanup.
 Separate compact receipts survive that removal until identity expiry, so early

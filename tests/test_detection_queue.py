@@ -6,6 +6,7 @@ import threading
 import time
 import types
 import uuid
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
@@ -993,3 +994,53 @@ def test_keyed_request_writer_contention_keeps_same_loop_reads_responsive(queued
     finally:
         blocker.rollback()
         blocker.close()
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_full_retention_artifact_stat_failure_does_not_strand_committed_admission(queued_client, monkeypatch, tmp_path, caplog, keyed):
+    client, store, started, release, observed = queued_client
+    old_key = submission_key()
+    previous, _, _ = store.create_submission(
+        old_key, SOURCES[0], max_frames=5, save_frames=False, capacity=10,
+    )
+    store.update(previous.job_id, status="complete", completed_at=datetime.now(timezone.utc))
+    artifact = tmp_path / "artifacts" / previous.job_id / "frame.jpg"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"original")
+    exists = Path.exists
+    def stat_failure(path):
+        if path == artifact.parent:
+            raise OSError("Artifact stat unavailable")
+        return exists(path)
+    monkeypatch.setattr(Path, "exists", stat_failure)
+    monkeypatch.setattr(settings, "max_retained_jobs", 1)
+    monkeypatch.setattr(client._transport, "raise_server_exceptions", False)
+    key = submission_key()
+    headers = {"Idempotency-Key": key} if keyed else {}
+    endpoint = "/detection-submissions/v1" if keyed else "/detect-accident"
+    response = client.post(endpoint, json={"stream_url": SOURCES[1]}, headers=headers)
+    assert response.status_code == 202
+    jid = response.json()["job_id"]
+    assert started.wait(2) and observed["order"] == [jid]
+    assert artifact.read_bytes() == b"original" and store.get(previous.job_id) is None
+    assert any("Could not remove expired job artifacts" in record.message and record.exc_info
+               for record in caplog.records)
+    if keyed:
+        lookup = client.get("/detection-submissions/v1", headers=headers)
+        replay = client.post(endpoint, json={"stream_url": SOURCES[1]}, headers=headers)
+        assert lookup.status_code == replay.status_code == 200
+        assert lookup.json()["job_id"] == replay.json()["job_id"] == jid
+    release.set()
+    wait_for(lambda: store.get(jid).status == "complete")
+    assert observed["order"] == [jid]
+    snapshot = sqlite3.connect(str(tmp_path / "stat-restart.sqlite3"))
+    with store._lock:
+        store._db.backup(snapshot)
+    snapshot.close()
+    restarted = JobStore(database_path=str(tmp_path / "stat-restart.sqlite3"), start_reaper=False)
+    try:
+        assert restarted.get(jid).status == "complete" and restarted.get(previous.job_id) is None
+        if keyed:
+            assert restarted.find_submission(key)[0].job_id == jid
+    finally:
+        restarted._db.close()
