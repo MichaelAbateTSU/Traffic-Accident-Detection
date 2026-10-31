@@ -471,7 +471,7 @@ class JobStore:
         start_time: datetime,
         end_time: datetime,
     ) -> int:
-        """Count incidents detected within the provided UTC range."""
+        """Count retained alarm-active frame records in the UTC range, not episodes."""
         _, total = self.list_events_paginated(
             start_time=start_time,
             end_time=end_time,

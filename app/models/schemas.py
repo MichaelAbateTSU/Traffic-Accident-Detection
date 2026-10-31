@@ -56,13 +56,17 @@ class SignalValues(BaseModel):
 
 
 class DetectionEvent(BaseModel):
-    """A single frame where the accident flag crossed the HIGH_THRESHOLD."""
+    """One processed frame with an active heuristic alarm, not a verified accident or new episode.
+
+    Consecutive active frames each produce a record; hysteresis may retain the
+    alarm below the high threshold without a new threshold crossing.
+    """
 
     frame_idx: int = Field(description="Zero-based frame index within the job.")
     timestamp_sec: float = Field(
         description="Processing elapsed seconds from actual job start, not media time or queue admission."
     )
-    accident_detected: bool
+    accident_detected: bool = Field(description="Heuristic alarm state for this frame, not verified collision detection.")
     confidence_score: float = Field(
         ge=0.0,
         le=1.0,
@@ -204,14 +208,24 @@ class ApiMeta(BaseModel):
 # Stats models
 # ---------------------------------------------------------------------------
 
+ALARM_FRAME_COUNT_DESCRIPTION = (
+    "Retained alarm-active frame records detected from UTC midnight through now, "
+    "including consecutive frames and resolved records; not distinct accidents or episodes."
+)
+NONFAILED_JOB_RATIO_DESCRIPTION = (
+    "Legacy name: nonfailed retained-job percentage in the admission-time lookback, "
+    "including pending/running jobs; rounded to 2 decimals, 100 when empty. "
+    "Not measured service uptime. Numerator examines at most 10,000 newest jobs."
+)
+
 class StatsOverview(BaseModel):
     """Dashboard overview values for card widgets."""
 
     active_cameras: int = Field(ge=0)
     total_cameras: int = Field(ge=0)
-    incidents_today: int = Field(ge=0)
+    incidents_today: int = Field(ge=0, description=ALARM_FRAME_COUNT_DESCRIPTION)
     detection_status: Literal["active", "idle", "degraded", "starting"]
-    uptime_percent: float = Field(ge=0.0, le=100.0)
+    uptime_percent: float = Field(ge=0.0, le=100.0, description=NONFAILED_JOB_RATIO_DESCRIPTION)
     active_jobs: int = Field(ge=0)
     total_jobs: int = Field(ge=0)
     refreshed_at: datetime
@@ -221,9 +235,9 @@ class StatsOverview(BaseModel):
     # UI-friendly aliases (camelCase)
     activeCameras: int = Field(ge=0)
     totalCameras: int = Field(ge=0)
-    incidentsToday: int = Field(ge=0)
+    incidentsToday: int = Field(ge=0, description=ALARM_FRAME_COUNT_DESCRIPTION)
     detectionStatus: Literal["active", "idle", "degraded", "starting"]
-    uptimePercent: float = Field(ge=0.0, le=100.0)
+    uptimePercent: float = Field(ge=0.0, le=100.0, description=NONFAILED_JOB_RATIO_DESCRIPTION)
 
 
 class StatsOverviewResponse(BaseModel):
@@ -237,7 +251,7 @@ class StatsOverviewResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class IncidentSummary(BaseModel):
-    """Lightweight incident projection suitable for list views."""
+    """One alarm-active frame record; not a distinct verified accident or independent episode."""
 
     incident_id: str
     id: str
@@ -389,9 +403,9 @@ class FrontendStats(BaseModel):
     # snake_case (native API)
     active_cameras: int
     total_cameras: int
-    incidents_today: int
+    incidents_today: int = Field(description=ALARM_FRAME_COUNT_DESCRIPTION)
     detection_status: Literal["active", "idle", "degraded", "starting"]
-    uptime_percent: float
+    uptime_percent: float = Field(description=NONFAILED_JOB_RATIO_DESCRIPTION)
     active_jobs: int
     total_jobs: int
     refreshed_at: datetime
@@ -399,12 +413,14 @@ class FrontendStats(BaseModel):
     # camelCase (UI convenience)
     activeCameras: int
     totalCameras: int
-    incidentsToday: int
+    incidentsToday: int = Field(description=ALARM_FRAME_COUNT_DESCRIPTION)
     detectionStatus: Literal["active", "idle", "degraded", "starting"]
-    uptimePercent: float
+    uptimePercent: float = Field(description=NONFAILED_JOB_RATIO_DESCRIPTION)
 
 
 class FrontendIncident(BaseModel):
+    """One alarm-active frame record, not a verified accident or independent episode."""
+
     # identifiers
     incident_id: str
     id: str

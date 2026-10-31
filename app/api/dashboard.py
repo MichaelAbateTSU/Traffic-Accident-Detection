@@ -97,10 +97,11 @@ def _to_frontend_incident(record: dict) -> FrontendIncident:
     "/dashboard",
     response_model=FrontendDashboardResponse,
     summary="Get dashboard bootstrap payload (stats + incidents + cameras)",
+    description="Incidents are alarm-active frame records, not distinct accidents; uptime_percent is a nonfailed-job fraction, not measured service uptime.",
 )
 async def get_dashboard(
     request: Request,
-    history_days: int = Query(default=30, ge=1, le=365),
+    history_days: int = Query(default=30, ge=1, le=365, description="Admission-time lookback for the retained nonfailed-job fraction."),
     incidents_page_size: int = Query(default=5, ge=1, le=50),
     incidents_status: Literal["active", "resolved", "all"] = Query(default="active"),
 ) -> FrontendDashboardResponse:

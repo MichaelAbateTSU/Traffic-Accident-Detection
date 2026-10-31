@@ -329,7 +329,7 @@ Dashboard-oriented aggregate metrics with metadata envelope.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `history_days` | integer | `30` | Lookback window used to estimate `uptime_percent` |
+| `history_days` | integer | `30` | Admission-time lookback for the retained nonfailed-job fraction (not service uptime) |
 
 **Response `200 OK`:**
 
@@ -361,6 +361,23 @@ Dashboard-oriented aggregate metrics with metadata envelope.
 ---
 
 ### `GET /incidents`
+
+An "incident" is one retained processed frame while the heuristic alarm is
+active, identified by `job_id:frame_idx`. Consecutive active frames remain
+separate records, including when hysteresis holds the alarm below the high
+threshold. These records are **not distinct verified accidents or independent
+alarm episodes**. `/stats/overview` and `/dashboard` `incidents_today` /
+`incidentsToday` count these retained records from UTC midnight through now,
+including resolved records, without grouping; expiry/retention can reduce the
+count.
+
+The legacy `uptime_percent` / `uptimePercent` is **not service uptime**. It is
+`100 * nonfailed jobs / jobs` in the `history_days` admission-time window,
+rounded to two decimals. Pending, running and complete jobs count as nonfailed;
+failed jobs do not. An empty window returns 100 by convention, not evidence of
+availability. Only retained jobs participate; the numerator inspects at most
+the 10,000 newest matching jobs while the denominator counts all matching jobs.
+Both dashboard and stats preserve this behavior and naming for compatibility.
 
 Paginated incident feed derived from detection events.
 
