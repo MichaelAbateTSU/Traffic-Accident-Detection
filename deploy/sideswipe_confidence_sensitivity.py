@@ -87,7 +87,7 @@ def main():
                 final = pipeline._run_yolo(model, processed)
                 paths = []
                 for confidence, output in observation["outputs"].items():
-                    boxes = ops.scale_boxes(observation["tensor_shape"][2:], output[:, :4], processed.shape)
+                    boxes = ops.scale_boxes(observation["tensor_shape"][2:], output[:, :4].clone(), processed.shape)
                     detections = [
                         {"xyxy_processed": box.tolist(),
                          "xyxy_source": [float(x) * 1.5 for x in box],
