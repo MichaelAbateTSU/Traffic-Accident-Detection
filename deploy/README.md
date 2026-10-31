@@ -37,9 +37,11 @@ Public ACME issuance, VM reboot and live-cloud availability remain unverified.
 
 **The current backend cannot safely run on Render Free.** No Render service
 was provisioned, and no public deployment is implied by this assessment.
-[Render's Free documentation](https://render.com/docs/free) specifies
-0.1 CPU / 512 MB web services, idle spin-down after 15 minutes, ephemeral local
-files, no free persistent disks, and Free Postgres expiry after 30 days.
+[Render's compute plans](https://render.com/docs/compute-plans) specify
+0.1 CPU / 512 MB for free web services.
+[Render's Free documentation](https://render.com/docs/free) describes idle
+spin-down after 15 minutes, ephemeral local files, no free persistent disks,
+and Free Postgres expiry after 30 days.
 These limits were supplied from an official-document review; this workspace
 could not independently refresh that page because `render.com` DNS resolution
 failed. Recheck the provider's current limits before making any purchase.
@@ -99,11 +101,13 @@ There are additional independent blockers even if memory were sufficient:
   always-running service and requires explicit cold-start/job interruption
   handling; keep-alive traffic is not an availability guarantee.
 
-The verified free candidate remains an **authorized Oracle Always Free VM**
-with sufficient free CPU, RAM and persistent storage for the existing Compose
-stack, subject to capacity/reclamation limitations below. Keeping the frontend
-on GitHub Pages is independent of this backend choice. If Render is mandatory,
-it requires a separately authorized **paid, adequately sized** runtime and
+**Render remains the user's preferred provider**; no alternative has been
+selected. An **authorized Oracle Always Free VM** is only an unselected free
+candidate with potentially sufficient CPU, RAM and persistent storage for the
+existing Compose stack, subject to capacity/reclamation limitations below.
+No Oracle VM deployment has been verified. Keeping the frontend on GitHub Pages
+is independent of this backend choice. Deploying this backend on Render requires
+a separately authorized **paid, adequately sized** runtime and
 durable disk or database/object storage, plus an enforceable egress design.
 The existing two-CPU/4-GB runtime envelope is tested; no smaller paid tier is
 certified here. Paying for RAM alone does not fix the other blockers. No paid
