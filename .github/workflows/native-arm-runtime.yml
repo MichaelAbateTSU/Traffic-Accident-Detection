@@ -56,3 +56,38 @@ jobs:
             --mount "type=bind,source=$PWD/deploy/verify_cpu_runtime.py,target=/app/verify_cpu_runtime.py,readonly" \
             traffic-detection-cpu:ci \
             python verify_cpu_runtime.py --expected-machine aarch64
+      - name: Fetch fixed public-domain controlled-test source
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          mkdir -p "$RUNNER_TEMP/niosh-media" "$RUNNER_TEMP/niosh-results"
+          chmod 777 "$RUNNER_TEMP/niosh-results"
+          curl --fail --location --max-time 180 --max-filesize 80000000 \
+            https://upload.wikimedia.org/wikipedia/commons/b/b5/Crash_Testing_an_Ambulance.webm \
+            -o "$RUNNER_TEMP/niosh-media/crash.webm"
+          echo "8f1b4066b513067d0ac1118d5ed68e55a854fd2d4bdd54d592d341baf27b43cc  $RUNNER_TEMP/niosh-media/crash.webm" | sha256sum -c -
+      - name: Verify mapping and evaluate offline sparse controlled-test labels
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          printf 'FROM traffic-detection-cpu:ci\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*\nUSER detector\n' > "$RUNNER_TEMP/experiment.Dockerfile"
+          docker build -f "$RUNNER_TEMP/experiment.Dockerfile" -t ni-osh-experiment .
+          timeout 300 docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --cpus 2 --memory 4g --pids-limit 128 --tmpfs /tmp:size=256m,mode=1777 \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/source \
+            -e INFERENCE_THREADS=2 \
+            --mount "type=bind,source=$PWD,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/niosh-media,target=/media,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/niosh-results,target=/results" \
+            ni-osh-experiment python /source/deploy/niosh_experiment.py
+      - name: Upload numerical results only
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ni-osh-sparse-numerical-results
+          path: |
+            ${{ runner.temp }}/niosh-results/verified-labels.json
+            ${{ runner.temp }}/niosh-results/manifest.json
+            ${{ runner.temp }}/niosh-results/evaluation/summary.json
+            ${{ runner.temp }}/niosh-results/evaluation/niosh_sparse/frames.jsonl
+          if-no-files-found: error
+          retention-days: 7
